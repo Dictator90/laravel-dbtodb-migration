@@ -1,0 +1,53 @@
+{
+  "name": "mb4it/laravel-dbtodb-migration",
+  "description": "Laravel artisan command to migrate data between database connections (1 source → N targets) with configurable table/column mapping, chunking, and optional profiling logs.",
+  "type": "library",
+  "license": "MIT",
+  "keywords": [
+    "laravel",
+    "database",
+    "migration",
+    "mysql",
+    "postgresql",
+    "upsert",
+    "etl"
+  ],
+  "authors": [
+    {
+      "name": "Maxim Bezvodinskikh",
+      "email": "m.bezvodinskikh@gmail.com",
+      "homepage": "https://mb4it.ru",
+      "role": "Developer"
+    }
+  ],
+  "require": {
+    "php": "^8.2",
+    "laravel/framework": "^v12"
+  },
+  "require-dev": {
+    "orchestra/testbench": "^10.0",
+    "phpunit/phpunit": "^11.0"
+  },
+  "autoload": {
+    "psr-4": {
+      "MB\\DbToDb\\": "src/"
+    }
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "MB\\DbToDb\\Tests\\": "tests/"
+    }
+  },
+  "extra": {
+    "laravel": {
+      "providers": [
+        "MB\\DbToDb\\DbToDbServiceProvider"
+      ]
+    }
+  },
+  "minimum-stability": "stable",
+  "prefer-stable": true,
+  "config": {
+    "sort-packages": true
+  }
+}
