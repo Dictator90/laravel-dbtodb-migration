@@ -12,6 +12,13 @@ class DbToDbTargetWriter
      */
     private array $resolvedPrimaryKeyCache = [];
 
+    private TargetTablePrimaryKeyResolver $primaryKeyResolver;
+
+    public function __construct(?TargetTablePrimaryKeyResolver $primaryKeyResolver = null)
+    {
+        $this->primaryKeyResolver = $primaryKeyResolver ?? new TargetTablePrimaryKeyResolver;
+    }
+
     public function resetPrimaryKeyCache(): void
     {
         $this->resolvedPrimaryKeyCache = [];
@@ -154,54 +161,9 @@ class DbToDbTargetWriter
     {
         $cacheKey = $connection."\0".$table;
         if (! array_key_exists($cacheKey, $this->resolvedPrimaryKeyCache)) {
-            $this->resolvedPrimaryKeyCache[$cacheKey] = $this->resolvePrimaryKeys($connection, $table);
+            $this->resolvedPrimaryKeyCache[$cacheKey] = $this->primaryKeyResolver->resolve($connection, $table);
         }
 
         return $this->resolvedPrimaryKeyCache[$cacheKey];
-    }
-
-    /**
-     * @return list<string>
-     */
-    private function resolvePrimaryKeys(string $connection, string $table): array
-    {
-        $driver = DB::connection($connection)->getDriverName();
-
-        if ($driver === 'sqlite') {
-            $rows = DB::connection($connection)->select(sprintf('PRAGMA table_info("%s")', str_replace('"', '""', $table)));
-
-            $keys = [];
-            foreach ($rows as $row) {
-                $data = (array) $row;
-                if ((int) ($data['pk'] ?? 0) === 1) {
-                    $keys[] = (string) ($data['name'] ?? '');
-                }
-            }
-
-            return array_values(array_filter($keys));
-        }
-
-        if ($driver === 'pgsql') {
-            // Prefer information_schema + search_path (same idea as DbToDbRoutingExecutor::tableColumnsByName).
-            // Raw pg_class/pg_index without schema can miss the table or match the wrong relation.
-            $rows = DB::connection($connection)->select(
-                <<<'SQL'
-                SELECT kcu.column_name
-                FROM information_schema.table_constraints tc
-                JOIN information_schema.key_column_usage kcu
-                    ON tc.constraint_schema = kcu.constraint_schema
-                    AND tc.constraint_name = kcu.constraint_name
-                WHERE tc.table_schema = ANY (current_schemas(true))
-                  AND tc.table_name = ?
-                  AND tc.constraint_type = 'PRIMARY KEY'
-                ORDER BY kcu.ordinal_position
-                SQL,
-                [$table],
-            );
-
-            return array_values(array_map(static fn (object $row): string => (string) $row->column_name, $rows));
-        }
-
-        return [];
     }
 }

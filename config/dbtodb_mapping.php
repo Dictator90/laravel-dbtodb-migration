@@ -36,6 +36,37 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Auto-increment / serial / identity sync (after run)
+    |--------------------------------------------------------------------------
+    |
+    | When sync_serial_sequences is true, after a successful db:to-db (not --dry-run,
+    | no failed pipelines) the command adjusts counters on the --target connection:
+    | PostgreSQL (setval on SERIAL/IDENTITY), MySQL/MariaDB (AUTO_INCREMENT), SQLite
+    | (sqlite_sequence when AUTOINCREMENT), SQL Server (DBCC CHECKIDENT). Unsupported
+    | drivers are skipped (use -v for a short notice).
+    |
+    | Env: DB_TO_DB_SYNC_SERIAL_SEQUENCES
+    |
+    */
+    'sync_serial_sequences' => filter_var(env('DB_TO_DB_SYNC_SERIAL_SEQUENCES', false), FILTER_VALIDATE_BOOLEAN),
+
+    /*
+    | Target tables to touch (Laravel table prefix is applied automatically). Each entry:
+    | - string: table name, column defaults to "id"
+    | - array: ['table' => 'watches', 'column' => 'idw'] — omit column to auto-resolve a single-column PK
+    |
+    | Leave this list empty ([]) to sync every distinct target table from the current
+    | run’s pipelines that uses the same connection name as --target (PK column from a
+    | lone upsert "keys" hint when present, otherwise introspected).
+    |
+    */
+    'sync_serial_sequence_tables' => [
+        // 'submodellines',
+        // ['table' => 'watches', 'column' => 'idw'],
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Runtime defaults
     |--------------------------------------------------------------------------
     |
@@ -136,11 +167,6 @@ return [
     |--------------------------------------------------------------------------
     | Per-source / per-target transforms (see README)
     |--------------------------------------------------------------------------
-    |
-    | String rules: trim, null_if_empty, zero_date_to_null
-    | Object rules: if_eq; multiply (by); round_precision (precision, optional when/in/then_precision); invoke (using)
-    | Closures in a rule list: fn(mixed $value, array $sourceRow): mixed
-    |
     */
     'transforms' => [
         'source_items' => [

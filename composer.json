@@ -2,6 +2,7 @@
   "name": "mb4it/laravel-dbtodb-migration",
   "description": "Laravel artisan command to migrate data between database connections (1 source → N targets) with configurable table/column mapping, chunking, and optional profiling logs.",
   "type": "library",
+  "version": "1.0.1",
   "license": "MIT",
   "keywords": [
     "laravel",

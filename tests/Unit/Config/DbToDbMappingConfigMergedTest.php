@@ -32,5 +32,9 @@ class DbToDbMappingConfigMergedTest extends TestCase
         $this->assertArrayHasKey('filters', $config);
         $this->assertArrayHasKey('upsert_keys', $config);
         $this->assertArrayHasKey('auto_transforms', $config);
+        $this->assertArrayHasKey('sync_serial_sequences', $config);
+        $this->assertIsBool($config['sync_serial_sequences']);
+        $this->assertArrayHasKey('sync_serial_sequence_tables', $config);
+        $this->assertIsArray($config['sync_serial_sequence_tables']);
     }
 }

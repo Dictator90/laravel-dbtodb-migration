@@ -2,10 +2,12 @@
 
 namespace MB\DbToDb\Console;
 
+use MB\DbToDb\Support\Database\AutoIncrementSynchronizer;
 use MB\DbToDb\Support\Database\DbToDbRoutingExecutor;
 use MB\DbToDb\Support\ProfileLoggingChannel;
 use Illuminate\Console\Command;
 use Illuminate\Support\Arr;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Log;
 use RuntimeException;
@@ -28,6 +30,7 @@ class DbToDbCommand extends Command
 
     public function __construct(
         private DbToDbRoutingExecutor $executor,
+        private AutoIncrementSynchronizer $autoIncrementSynchronizer,
     ) {
         parent::__construct();
     }
@@ -149,6 +152,46 @@ class DbToDbCommand extends Command
                     $progressBar->finish();
                     $this->newLine(2);
                 }
+            }
+
+            $syncTablesRaw = config('dbtodb_mapping.sync_serial_sequence_tables', []);
+            if (! is_array($syncTablesRaw)) {
+                $syncTablesRaw = [];
+            }
+            $syncSerial = filter_var(config('dbtodb_mapping.sync_serial_sequences', false), FILTER_VALIDATE_BOOLEAN);
+
+            $syncDefinitions = [];
+            if ($syncSerial && ! $dryRun && $failedCount === 0) {
+                if ($syncTablesRaw === []) {
+                    $syncDefinitions = $this->resolveAutoIncrementSyncFromPipelines($pipelines, $target);
+                } else {
+                    $syncDefinitions = $this->normalizeSyncSerialSequenceTablesConfig($syncTablesRaw);
+                }
+            }
+
+            if ($syncSerial && ! $dryRun && $syncDefinitions !== [] && $failedCount === 0) {
+                $driver = DB::connection($target)->getDriverName();
+                $supportedDrivers = ['pgsql', 'mysql', 'mariadb', 'sqlite', 'sqlsrv'];
+                if (in_array($driver, $supportedDrivers, true)) {
+                    $onSkip = $this->output->isVerbose()
+                        ? function (string $message): void {
+                            $this->comment($message);
+                        }
+                        : null;
+                    $this->autoIncrementSynchronizer->sync($target, $syncDefinitions, $onSkip);
+                    $this->info(sprintf(
+                        'Auto-increment / sequences synchronized for %d table(s) on connection "%s".',
+                        count($syncDefinitions),
+                        $target,
+                    ));
+                } elseif ($this->output->isVerbose()) {
+                    $this->comment(sprintf(
+                        'sync_serial_sequences is enabled but target driver "%s" is not supported; skipped.',
+                        $driver,
+                    ));
+                }
+            } elseif ($syncSerial && ! $dryRun && $syncTablesRaw === [] && $failedCount === 0 && $syncDefinitions === [] && $this->output->isVerbose()) {
+                $this->comment('sync_serial_sequences is enabled but no target tables were resolved for this run (check pipelines / --target).');
             }
 
             $headers = ['pipeline', 'status', 'source_table', 'target_table', 'read', 'written', 'reason'];
@@ -854,6 +897,80 @@ class DbToDbCommand extends Command
         }
 
         @ini_set('memory_limit', $limit);
+    }
+
+    /**
+     * @param  list<mixed>  $raw
+     * @return list<array{table: string, column: string|null}>
+     */
+    private function normalizeSyncSerialSequenceTablesConfig(array $raw): array
+    {
+        $out = [];
+        foreach ($raw as $entry) {
+            if (is_string($entry)) {
+                $table = trim($entry);
+                if ($table !== '') {
+                    $out[] = ['table' => $table, 'column' => 'id'];
+                }
+
+                continue;
+            }
+
+            if (! is_array($entry) || ! isset($entry['table'])) {
+                continue;
+            }
+
+            $table = trim((string) $entry['table']);
+            if ($table === '') {
+                continue;
+            }
+
+            $col = $entry['column'] ?? null;
+            $column = is_string($col) && trim($col) !== '' ? trim($col) : null;
+            $out[] = ['table' => $table, 'column' => $column];
+        }
+
+        return $out;
+    }
+
+    /**
+     * @param  list<array<string, mixed>>  $pipelines
+     * @return list<array{table: string, column: string|null}>
+     */
+    private function resolveAutoIncrementSyncFromPipelines(array $pipelines, string $targetConnection): array
+    {
+        $seen = [];
+        $out = [];
+        foreach ($pipelines as $pipeline) {
+            foreach ((array) ($pipeline['targets'] ?? []) as $target) {
+                if (! is_array($target)) {
+                    continue;
+                }
+                if ((string) ($target['connection'] ?? '') !== $targetConnection) {
+                    continue;
+                }
+                $table = trim((string) ($target['table'] ?? ''));
+                if ($table === '') {
+                    continue;
+                }
+                if (array_key_exists($table, $seen)) {
+                    continue;
+                }
+                $seen[$table] = true;
+
+                $keys = array_values(array_filter(
+                    array_map(
+                        static fn (mixed $k): string => is_string($k) ? trim($k) : '',
+                        array_values((array) ($target['keys'] ?? [])),
+                    ),
+                    static fn (string $s): bool => $s !== '',
+                ));
+                $column = count($keys) === 1 ? $keys[0] : null;
+                $out[] = ['table' => $table, 'column' => $column];
+            }
+        }
+
+        return $out;
     }
 
     private function sanitizeExceptionMessage(string $message, int $maxLength = 1000): string
