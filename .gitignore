@@ -1,10 +1,11 @@
-/vendor/
 composer.lock
 .phpunit.result.cache
-.phpunit.unit.cache/
+.phpunit.unit.cache
 .php-cs-fixer.cache
+vendor/
 .idea/
 .vscode/
 .cursor/
 .agent/
 .cursorrules/
+.phpunit.cache/

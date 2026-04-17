@@ -224,6 +224,20 @@ Supported operators on the **source** query include: `=`, `!=`, `>`, `>=`, `<`, 
 
 `exists_in` builds a semi-join against another table (see `DbToDbSourceReader`). It is only valid on **source** filters; target-side filters do not support `exists_in`.
 
+### Column transforms
+
+Transforms run **before** target type coercion. Each source column can use a single rule or a **list** applied in order.
+
+- **Strings**: `trim`, `null_if_empty`, `zero_date_to_null`.
+- **Objects** (use a `rule` key):
+  - `if_eq` — `{ "rule": "if_eq", "value": <any>, "then": <any> }` replaces the cell when it equals `value`.
+  - `multiply` — `{ "rule": "multiply", "by": <number> }`; `null` stays `null`.
+  - `round_precision` — `{ "rule": "round_precision", "precision": <int> }` runs PHP `round` on the current value. Optional branch: `"when": { "column": "idb", "in": [755] }, "then_precision": 0` uses `then_precision` when the named **source** column is in `in` (same row as the mapped value).
+  - `invoke` — `{ "rule": "invoke", "using": ["SomeClass", "handle"] }` where the callable is `(mixed $value, array $sourceRow)`.
+- **Closures** in the rule list: `(mixed $value, array $sourceRow)` return the next value (useful when config PHP can hold closures; JSON-published config cannot).
+
+Transforms receive the full **source row** so rules can depend on sibling columns (e.g. brand `idb` while transforming `price`).
+
 ### Order of tables and foreign keys
 
 Process parent tables before children, or use `filters` / `exists_in` so you only migrate rows that already have referential integrity on the target. With staged `tables`, order steps so dependencies are satisfied, or run `--step` manually in sequence.

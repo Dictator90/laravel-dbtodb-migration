@@ -136,6 +136,11 @@ return [
     |--------------------------------------------------------------------------
     | Per-source / per-target transforms (see README)
     |--------------------------------------------------------------------------
+    |
+    | String rules: trim, null_if_empty, zero_date_to_null
+    | Object rules: if_eq; multiply (by); round_precision (precision, optional when/in/then_precision); invoke (using)
+    | Closures in a rule list: fn(mixed $value, array $sourceRow): mixed
+    |
     */
     'transforms' => [
         'source_items' => [

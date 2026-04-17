@@ -596,7 +596,7 @@ class DbToDbRoutingExecutor
                 }
 
                 $payload[$targetColumn] = $this->normalizeByTargetType(
-                    $this->applyTransforms($value, $transforms[$sourceColumn] ?? null),
+                    $this->applyTransforms($value, $transforms[$sourceColumn] ?? null, $sourceRow),
                     $targetColumn,
                     $metadata,
                 );
@@ -626,7 +626,7 @@ class DbToDbRoutingExecutor
 
                 $value = $sourceRow[$sourceColumn];
                 $payload[$targetColumn] = $this->normalizeByTargetType(
-                    $this->applyTransforms($value, $transforms[$sourceColumn] ?? null),
+                    $this->applyTransforms($value, $transforms[$sourceColumn] ?? null, $sourceRow),
                     $targetColumn,
                     $metadata,
                 );
@@ -742,7 +742,10 @@ class DbToDbRoutingExecutor
         return preg_match($regex, $actual) === 1;
     }
 
-    private function applyTransforms(mixed $value, mixed $transformDefinition): mixed
+    /**
+     * @param  array<string, mixed>  $sourceRow
+     */
+    private function applyTransforms(mixed $value, mixed $transformDefinition, array $sourceRow = []): mixed
     {
         if ($transformDefinition === null) {
             return $this->normalizeValue($value);
@@ -752,14 +755,21 @@ class DbToDbRoutingExecutor
         $current = $value;
 
         foreach ($transforms as $transform) {
-            $current = $this->applyTransformRule($current, $transform);
+            $current = $this->applyTransformRule($current, $transform, $sourceRow);
         }
 
         return $this->normalizeValue($current);
     }
 
-    private function applyTransformRule(mixed $current, mixed $transform): mixed
+    /**
+     * @param  array<string, mixed>  $sourceRow
+     */
+    private function applyTransformRule(mixed $current, mixed $transform, array $sourceRow = []): mixed
     {
+        if ($transform instanceof \Closure) {
+            return $transform($current, $sourceRow);
+        }
+
         if (is_string($transform)) {
             if ($transform === 'trim') {
                 return is_string($current) ? trim($current) : $current;
@@ -787,6 +797,49 @@ class DbToDbRoutingExecutor
                 }
 
                 return $current == $transform['value'] ? $transform['then'] : $current;
+            }
+
+            if ($ruleName === 'multiply') {
+                if ($current === null) {
+                    return null;
+                }
+                if (! array_key_exists('by', $transform)) {
+                    throw new RuntimeException('Invalid transform rule "multiply": missing "by".');
+                }
+
+                return (float) $current * (float) $transform['by'];
+            }
+
+            if ($ruleName === 'round_precision') {
+                if ($current === null) {
+                    return null;
+                }
+                $precision = (int) ($transform['precision'] ?? 0);
+                if (isset($transform['when']) && is_array($transform['when']) && $sourceRow !== []) {
+                    $whenCol = (string) ($transform['when']['column'] ?? '');
+                    $whenIn = $transform['when']['in'] ?? null;
+                    if ($whenCol !== '' && is_array($whenIn)) {
+                        $cell = $sourceRow[$whenCol] ?? null;
+                        if (in_array($cell, $whenIn, true)) {
+                            $precision = (int) ($transform['then_precision'] ?? $precision);
+                        }
+                    }
+                }
+
+                return round((float) $current, $precision);
+            }
+
+            if ($ruleName === 'invoke') {
+                $using = $transform['using'] ?? null;
+                if (! is_array($using) || count($using) !== 2) {
+                    throw new RuntimeException('Invalid transform rule "invoke": "using" must be a [class, method] array.');
+                }
+                $callable = $using;
+                if (! is_callable($callable)) {
+                    throw new RuntimeException('Invalid transform rule "invoke": "using" is not callable.');
+                }
+
+                return $callable($current, $sourceRow);
             }
 
             throw new RuntimeException(sprintf('Unsupported transform rule "%s".', $ruleName));
