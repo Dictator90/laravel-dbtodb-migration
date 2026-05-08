@@ -580,6 +580,8 @@ class DbToDbRoutingExecutor
         $map = (array) ($target['map'] ?? []);
         /** @var array<string, mixed> $transforms */
         $transforms = (array) ($target['transforms'] ?? []);
+        /** @var array<string, mixed> $values */
+        $values = (array) ($target['values'] ?? []);
 
         $payload = [];
         if ($map === []) {
@@ -631,6 +633,25 @@ class DbToDbRoutingExecutor
                     $metadata,
                 );
             }
+        }
+
+        foreach ($values as $targetColumn => $value) {
+            if (! is_string($targetColumn) || trim($targetColumn) === '') {
+                throw new RuntimeException(sprintf(
+                    'Invalid static value for target "%s": target column must be a non-empty string.',
+                    $this->targetKey($target)
+                ));
+            }
+
+            if ($strict && ! array_key_exists($targetColumn, (array) $metadata['columns'])) {
+                throw new RuntimeException(sprintf(
+                    'Strict mapping failed for target "%s": static target column "%s" does not exist.',
+                    $this->targetKey($target),
+                    $targetColumn
+                ));
+            }
+
+            $payload[$targetColumn] = $this->normalizeByTargetType($this->normalizeValue($value), $targetColumn, $metadata);
         }
 
         if ($strict) {

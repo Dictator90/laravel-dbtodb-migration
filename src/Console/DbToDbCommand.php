@@ -317,6 +317,15 @@ class DbToDbCommand extends Command
                     ));
                 }
 
+                $values = $targetConfig['values'] ?? [];
+                if (! is_array($values)) {
+                    throw new RuntimeException(sprintf(
+                        'Invalid static values mapping for "%s" -> "%s". Expected values array.',
+                        $table,
+                        $targetTable,
+                    ));
+                }
+
                 $targetDef = [
                     'connection' => $target,
                     'table' => $targetTable,
@@ -324,6 +333,7 @@ class DbToDbCommand extends Command
                     'map' => $map,
                     'transforms' => $transforms,
                     'filters' => $targetConfig['filters'] ?? [],
+                    'values' => $values,
                 ];
 
                 $upsertKeys = $this->normalizeStringList($targetConfig['upsert_keys'] ?? []);
@@ -635,7 +645,7 @@ class DbToDbCommand extends Command
             ));
         }
 
-        $reserved = ['columns', 'transforms', 'filters', 'upsert_keys', 'operation'];
+        $reserved = ['columns', 'transforms', 'filters', 'upsert_keys', 'operation', 'values'];
         $hasFullShape = false;
         foreach ($reserved as $key) {
             if (array_key_exists($key, $definition)) {

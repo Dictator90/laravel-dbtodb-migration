@@ -117,6 +117,9 @@ Use the short syntax for simple column maps. Switch to the full target definitio
                             'link' => ['trim', 'null_if_empty'],
                         ],
                         'filters' => [],
+                        'values' => [
+                            'source_type' => 'catalog',
+                        ],
                         'upsert_keys' => ['id'],
                         'operation' => 'upsert',
                     ],
@@ -167,6 +170,20 @@ php artisan db:to-db -m=catalog --step=dimensions
 | `--continue-on-error` | off | Continue after per-pipeline failures. |
 | `--report-file=` | timestamped file in `storage/logs` | Write JSON report. |
 | `--profile` | off | Log timings to `dbtodb_mapping.profile_logging`. |
+
+### Static target values
+
+Use `values` in a full target definition when the target needs columns that do not come from the source row (for example an `origin`, `source_type`, or status marker):
+
+```php
+'orders_a' => [
+    'unified_orders' => [
+        'columns' => ['id' => 'id', 'name' => 'title'],
+        'values' => ['origin' => 'orders_a'],
+        'upsert_keys' => ['id'],
+    ],
+],
+```
 
 ## Runtime and memory
 

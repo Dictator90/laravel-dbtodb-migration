@@ -11,9 +11,10 @@ All notable changes to `mb4it/laravel-dbtodb-migration` will be documented in th
 - Added migration-level `source` and `target` connection configuration so normal runs no longer require connection CLI options.
 - Added `--migration` with short alias `-m` for selecting a named migration.
 - Added short table syntax: `source_table => [target_table => [source_column => target_column]]`.
-- Added full table syntax with per-source filters/runtime options and per-target columns, transforms, filters, upsert keys, and operation.
+- Added full table syntax with per-source filters/runtime options and per-target columns, transforms, filters, static values, upsert keys, and operation.
 - Added ordered migration `steps` for staged runs.
 - Added stress coverage for 30,000 source rows, multiple targets, source and target filters, keyset pagination, transforms, dry runs, reports, and continue-on-error behavior.
+- Added fan-out/fan-in coverage for one source table to multiple targets and multiple source tables to one target with static target values.
 
 ### Changed
 

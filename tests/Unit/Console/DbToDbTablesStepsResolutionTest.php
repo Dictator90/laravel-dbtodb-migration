@@ -224,6 +224,7 @@ class DbToDbTablesStepsResolutionTest extends TestCase
                                 'columns' => ['link' => 'link'],
                                 'transforms' => ['link' => ['trim']],
                                 'filters' => ['kind' => 'main'],
+                                'values' => ['origin' => 'catalog'],
                                 'upsert_keys' => ['id'],
                                 'operation' => 'insert',
                             ],
@@ -249,6 +250,7 @@ class DbToDbTablesStepsResolutionTest extends TestCase
         $this->assertSame(['link' => 'link'], $pipelines[0]['targets'][0]['map']);
         $this->assertSame(['link' => ['trim']], $pipelines[0]['targets'][0]['transforms']);
         $this->assertSame(['kind' => 'main'], $pipelines[0]['targets'][0]['filters']);
+        $this->assertSame(['origin' => 'catalog'], $pipelines[0]['targets'][0]['values']);
         $this->assertSame(['id'], $pipelines[0]['targets'][0]['keys']);
     }
 

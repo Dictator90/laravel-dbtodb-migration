@@ -234,6 +234,8 @@ class DbToDbStressMigrationTest extends TestCase
 
     public function test_stress_migration_processes_30000_rows_with_filters_transforms_and_multiple_targets(): void
     {
+        $startedAt = microtime(true);
+
         $dryRunExit = Artisan::call('db:to-db', [
             '-m' => 'stress',
             '--step' => 'main',
@@ -281,10 +283,23 @@ class DbToDbStressMigrationTest extends TestCase
         $this->assertSame('ok', $report['pipelines'][0]['status']);
         $this->assertSame(12000, $report['pipelines'][0]['read']);
         $this->assertSame(16000, $report['pipelines'][0]['written']);
+
+        fwrite(STDERR, sprintf(
+            "
+Stress migration stats: source_rows=%d matched_rows=%d target_rows=%d written=%d duration_ms=%d
+",
+            30000,
+            12000,
+            16000,
+            16000,
+            (int) round((microtime(true) - $startedAt) * 1000),
+        ));
     }
 
     public function test_stress_migration_continue_on_error_reports_invalid_pipeline_after_valid_pipeline(): void
     {
+        $startedAt = microtime(true);
+
         $exit = Artisan::call('db:to-db', [
             '-m' => 'stress',
             '--continue-on-error' => true,
@@ -302,5 +317,15 @@ class DbToDbStressMigrationTest extends TestCase
         $this->assertSame('ok', $report['pipelines'][0]['status']);
         $this->assertSame('failed', $report['pipelines'][1]['status']);
         $this->assertStringContainsString('missing_target_column', $report['pipelines'][1]['reason']);
+
+        fwrite(STDERR, sprintf(
+            "
+Stress continue-on-error stats: source_rows=%d successful_target_rows=%d failed_pipelines=%d duration_ms=%d
+",
+            30001,
+            16000,
+            1,
+            (int) round((microtime(true) - $startedAt) * 1000),
+        ));
     }
 }
