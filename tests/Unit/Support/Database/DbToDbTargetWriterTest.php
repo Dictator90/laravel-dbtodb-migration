@@ -15,6 +15,8 @@ class DbToDbTargetWriterTest extends TestCase
         Schema::dropIfExists('dedupe_upsert_test');
         Schema::dropIfExists('pk_cache_reset_test');
         Schema::dropIfExists('chunk_upsert_test');
+        Schema::dropIfExists('insert_operation_test');
+        Schema::dropIfExists('truncate_insert_writer_test');
 
         parent::tearDown();
     }
@@ -65,6 +67,59 @@ class DbToDbTargetWriterTest extends TestCase
         ], [['id' => 2]]);
 
         $this->assertSame(2, (int) DB::table('pk_cache_reset_test')->count());
+    }
+
+    public function test_insert_operation_does_not_upsert_existing_rows(): void
+    {
+        Schema::create('insert_operation_test', function (Blueprint $table): void {
+            $table->integer('id')->primary();
+            $table->string('val');
+        });
+
+        DB::table('insert_operation_test')->insert(['id' => 1, 'val' => 'existing']);
+
+        $writer = new DbToDbTargetWriter;
+        $this->expectException(\Illuminate\Database\QueryException::class);
+
+        $writer->write([
+            'connection' => 'sqlite',
+            'table' => 'insert_operation_test',
+            'operation' => 'insert',
+            'keys' => ['id'],
+        ], [
+            ['id' => 1, 'val' => 'new'],
+        ]);
+    }
+
+    public function test_truncate_insert_truncates_target_only_once_per_writer_run(): void
+    {
+        Schema::create('truncate_insert_writer_test', function (Blueprint $table): void {
+            $table->integer('id')->primary();
+            $table->string('val');
+        });
+
+        DB::table('truncate_insert_writer_test')->insert(['id' => 99, 'val' => 'old']);
+
+        $writer = new DbToDbTargetWriter;
+        $writer->write([
+            'connection' => 'sqlite',
+            'table' => 'truncate_insert_writer_test',
+            'operation' => 'truncate_insert',
+        ], [
+            ['id' => 1, 'val' => 'first'],
+        ]);
+
+        DB::table('truncate_insert_writer_test')->insert(['id' => 100, 'val' => 'between_chunks']);
+
+        $writer->write([
+            'connection' => 'sqlite',
+            'table' => 'truncate_insert_writer_test',
+            'operation' => 'truncate_insert',
+        ], [
+            ['id' => 2, 'val' => 'second'],
+        ]);
+
+        $this->assertSame([1, 2, 100], DB::table('truncate_insert_writer_test')->orderBy('id')->pluck('id')->all());
     }
 
     public function test_upsert_splits_batch_by_max_rows_per_upsert(): void

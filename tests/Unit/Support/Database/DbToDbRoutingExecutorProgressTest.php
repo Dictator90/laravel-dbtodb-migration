@@ -17,6 +17,8 @@ class DbToDbRoutingExecutorProgressTest extends TestCase
     {
         Schema::dropIfExists('dbtodb_src_progress');
         Schema::dropIfExists('dbtodb_dst_progress');
+        Schema::dropIfExists('dbtodb_src_dry_truncate_insert');
+        Schema::dropIfExists('dbtodb_dst_dry_truncate_insert');
 
         parent::tearDown();
     }
@@ -79,6 +81,47 @@ class DbToDbRoutingExecutorProgressTest extends TestCase
             ['read', 5, 5],
             ['write', 5, 5],
         ], $events);
+    }
+
+    public function test_dry_run_validates_truncate_insert_operation_without_truncating_target(): void
+    {
+        Schema::create('dbtodb_src_dry_truncate_insert', function (Blueprint $table): void {
+            $table->integer('id')->primary();
+        });
+        Schema::create('dbtodb_dst_dry_truncate_insert', function (Blueprint $table): void {
+            $table->integer('id')->primary();
+        });
+
+        DB::table('dbtodb_src_dry_truncate_insert')->insert(['id' => 1]);
+        DB::table('dbtodb_dst_dry_truncate_insert')->insert(['id' => 99]);
+
+        $pipeline = [
+            'name' => 'test_dry_truncate_insert',
+            'strict' => true,
+            'transaction_mode' => 'batch',
+            'source' => [
+                'connection' => 'sqlite',
+                'table' => 'dbtodb_src_dry_truncate_insert',
+                'chunk' => 1000,
+            ],
+            'targets' => [[
+                'connection' => 'sqlite',
+                'table' => 'dbtodb_dst_dry_truncate_insert',
+                'operation' => 'truncate_insert',
+                'map' => ['id' => 'id'],
+            ]],
+        ];
+
+        $executor = new DbToDbRoutingExecutor(
+            new DbToDbMappingValidator,
+            new DbToDbSourceReader,
+            new DbToDbTargetWriter,
+        );
+
+        $report = $executor->run([$pipeline], true, false)[0];
+
+        $this->assertSame('truncate_insert', $report['targets'][0]['operation']);
+        $this->assertSame([99], DB::table('dbtodb_dst_dry_truncate_insert')->pluck('id')->all());
     }
 
     public function test_pipeline_progress_callback_emits_read_only_on_dry_run(): void
