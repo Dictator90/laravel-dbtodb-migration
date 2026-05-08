@@ -16,28 +16,24 @@ class DbToDbCommandTest extends TestCase
 
         config([
             'dbtodb_mapping.strict' => true,
-            'dbtodb_mapping.tables' => ['source_items' => 'items'],
-            'dbtodb_mapping.columns' => [
-                'source_items' => [
-                    'items' => [
-                        'id' => 'id',
-                        'name' => 'name',
+            'dbtodb_mapping.migrations' => [
+                'default' => [
+                    'source' => 'db_source',
+                    'target' => 'db_target',
+                    'tables' => [
+                        'source_items' => [
+                            'items' => [
+                                'id' => 'id',
+                                'name' => 'name',
+                            ],
+                        ],
                     ],
                 ],
-            ],
-            'dbtodb_mapping.transforms' => [
-                'source_items' => [
-                    'items' => [],
-                ],
-            ],
-            'dbtodb_mapping.filters' => [
-                'source_items' => [],
             ],
             'dbtodb_mapping.runtime.defaults' => [
                 'chunk' => 100,
                 'transaction_mode' => 'batch',
             ],
-            'dbtodb_mapping.runtime.tables' => [],
         ]);
 
         Schema::connection('db_source')->dropIfExists('source_items');
@@ -71,8 +67,6 @@ class DbToDbCommandTest extends TestCase
     {
         $exit = Artisan::call('db:to-db', [
             '--dry-run' => true,
-            '--source' => 'db_source',
-            '--target' => 'db_target',
         ]);
 
         $this->assertSame(0, $exit);
@@ -81,10 +75,7 @@ class DbToDbCommandTest extends TestCase
 
     public function test_command_copies_rows_to_target(): void
     {
-        $exit = Artisan::call('db:to-db', [
-            '--source' => 'db_source',
-            '--target' => 'db_target',
-        ]);
+        $exit = Artisan::call('db:to-db');
 
         $this->assertSame(0, $exit);
         $this->assertSame(1, (int) DB::connection('db_target')->table('items')->count());

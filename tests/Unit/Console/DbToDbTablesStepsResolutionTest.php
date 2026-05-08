@@ -34,116 +34,166 @@ class DbToDbTablesStepsResolutionTest extends TestCase
     }
 
     /**
-     * @return array<string, mixed>
+     * @param  array<string, mixed>  $migrations
      */
-    private function mappingWithStepTables(bool $stepsInTables, array $tables): array
-    {
-        return [
-            'strict' => true,
-            'runtime' => [
-                'steps_in_tables' => $stepsInTables,
-                'defaults' => [
-                    'chunk' => 100,
-                    'max_rows_per_upsert' => 500,
-                    'transaction_mode' => 'batch',
-                ],
-                'memory' => [
-                    'memory_log_every_chunks' => 0,
-                    'force_gc_every_chunks' => 20,
-                ],
-                'profile_slow_chunk_seconds' => 5.0,
-                'tables' => [],
-            ],
-            'tables' => $tables,
-            'columns' => [
-                'z_src' => ['z_tgt' => ['id' => 'id']],
-                'a_src' => ['a_tgt' => ['id' => 'id']],
-                'dup' => ['t1' => ['id' => 'id']],
-            ],
-            'transforms' => [
-                'z_src' => ['z_tgt' => []],
-                'a_src' => ['a_tgt' => []],
-                'dup' => ['t1' => []],
-            ],
-            'filters' => [
-                'z_src' => [],
-                'a_src' => [],
-                'dup' => [],
-            ],
-        ];
-    }
-
-    /**
-     * @param  array<string, mixed>  $tables
-     */
-    private function applyDbtodbMapping(bool $stepsInTables, array $tables): void
+    private function applyDbtodbMigrations(array $migrations): void
     {
         $base = (array) config('dbtodb_mapping');
-        $patch = $this->mappingWithStepTables($stepsInTables, $tables);
-        $merged = array_replace_recursive($base, $patch);
-        $merged['tables'] = $patch['tables'];
-        $merged['columns'] = $patch['columns'];
-        $merged['transforms'] = $patch['transforms'];
-        $merged['filters'] = $patch['filters'];
-        $merged['strict'] = $patch['strict'];
-        $merged['runtime'] = array_replace_recursive($base['runtime'] ?? [], $patch['runtime']);
-        $merged['runtime']['steps_in_tables'] = $stepsInTables;
+        $base['migrations'] = $migrations;
+        $base['runtime']['defaults']['chunk'] = 100;
+        $base['runtime']['defaults']['transaction_mode'] = 'batch';
 
-        config(['dbtodb_mapping' => $merged]);
+        config(['dbtodb_mapping' => $base]);
     }
 
-    public function test_steps_in_tables_false_with_step_option_throws(): void
+    public function test_default_migration_is_used_when_option_is_omitted(): void
     {
-        $this->applyDbtodbMapping(false, [
-            'z_src' => 'z_tgt',
-            'a_src' => 'a_tgt',
-        ]);
-
-        $command = $this->app->make(DbToDbCommand::class);
-        $this->bindCommandInput($command, ['--step' => 'first']);
-
-        $this->expectException(RuntimeException::class);
-        $this->expectExceptionMessage('--step option is only valid when');
-
-        $command->resolvePipelines('db_source', 'db_target');
-    }
-
-    public function test_steps_in_tables_true_single_step_selects_only_that_step_tables(): void
-    {
-        $this->applyDbtodbMapping(true, [
-            'first' => ['z_src' => 'z_tgt'],
-            'second' => ['a_src' => 'a_tgt'],
-        ]);
-
-        $command = $this->app->make(DbToDbCommand::class);
-        $this->bindCommandInput($command, ['--step' => 'second']);
-
-        $pipelines = $command->resolvePipelines('db_source', 'db_target');
-        $this->assertCount(1, $pipelines);
-        $this->assertSame('a_src', $pipelines[0]['source']['table']);
-    }
-
-    public function test_steps_in_tables_true_all_steps_merges_in_step_order(): void
-    {
-        $this->applyDbtodbMapping(true, [
-            'first' => ['z_src' => 'z_tgt'],
-            'second' => ['a_src' => 'a_tgt'],
+        $this->applyDbtodbMigrations([
+            'default' => [
+                'source' => 'db_source',
+                'target' => 'db_target',
+                'tables' => [
+                    'z_src' => ['z_tgt' => ['id' => 'id']],
+                ],
+            ],
+            'second' => [
+                'source' => 'db_source',
+                'target' => 'db_target',
+                'tables' => [
+                    'a_src' => ['a_tgt' => ['id' => 'id']],
+                ],
+            ],
         ]);
 
         $command = $this->app->make(DbToDbCommand::class);
         $this->bindCommandInput($command, []);
 
-        $pipelines = $command->resolvePipelines('db_source', 'db_target');
+        $pipelines = $command->resolvePipelines();
+        $this->assertCount(1, $pipelines);
+        $this->assertSame('z_src', $pipelines[0]['source']['table']);
+        $this->assertSame('db_source', $pipelines[0]['source']['connection']);
+        $this->assertSame('db_target', $pipelines[0]['targets'][0]['connection']);
+    }
+
+    public function test_migration_alias_selects_named_migration(): void
+    {
+        $this->applyDbtodbMigrations([
+            'default' => [
+                'source' => 'db_source',
+                'target' => 'db_target',
+                'tables' => [
+                    'z_src' => ['z_tgt' => ['id' => 'id']],
+                ],
+            ],
+            'catalog' => [
+                'source' => 'legacy_mysql',
+                'target' => 'pgsql_app',
+                'tables' => [
+                    'top_banners' => [
+                        'catalog_banners' => ['link' => 'link'],
+                    ],
+                ],
+            ],
+        ]);
+
+        $command = $this->app->make(DbToDbCommand::class);
+        $this->bindCommandInput($command, ['-m' => 'catalog']);
+
+        $pipelines = $command->resolvePipelines();
+        $this->assertCount(1, $pipelines);
+        $this->assertSame('top_banners', $pipelines[0]['source']['table']);
+        $this->assertSame('legacy_mysql', $pipelines[0]['source']['connection']);
+        $this->assertSame('pgsql_app', $pipelines[0]['targets'][0]['connection']);
+        $this->assertSame(['link' => 'link'], $pipelines[0]['targets'][0]['map']);
+    }
+
+    public function test_unknown_migration_throws(): void
+    {
+        $this->applyDbtodbMigrations([
+            'default' => [
+                'source' => 'db_source',
+                'target' => 'db_target',
+                'tables' => [
+                    'z_src' => ['z_tgt' => ['id' => 'id']],
+                ],
+            ],
+        ]);
+
+        $command = $this->app->make(DbToDbCommand::class);
+        $this->bindCommandInput($command, ['--migration' => 'missing']);
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('Unknown migration "missing"');
+
+        $command->resolvePipelines();
+    }
+
+    public function test_single_step_selects_only_that_step_tables(): void
+    {
+        $this->applyDbtodbMigrations([
+            'default' => [
+                'source' => 'db_source',
+                'target' => 'db_target',
+                'steps' => [
+                    'first' => [
+                        'tables' => ['z_src' => ['z_tgt' => ['id' => 'id']]],
+                    ],
+                    'second' => [
+                        'tables' => ['a_src' => ['a_tgt' => ['id' => 'id']]],
+                    ],
+                ],
+            ],
+        ]);
+
+        $command = $this->app->make(DbToDbCommand::class);
+        $this->bindCommandInput($command, ['--step' => 'second']);
+
+        $pipelines = $command->resolvePipelines();
+        $this->assertCount(1, $pipelines);
+        $this->assertSame('a_src', $pipelines[0]['source']['table']);
+    }
+
+    public function test_steps_merge_in_step_order(): void
+    {
+        $this->applyDbtodbMigrations([
+            'default' => [
+                'source' => 'db_source',
+                'target' => 'db_target',
+                'steps' => [
+                    'first' => [
+                        'tables' => ['z_src' => ['z_tgt' => ['id' => 'id']]],
+                    ],
+                    'second' => [
+                        'tables' => ['a_src' => ['a_tgt' => ['id' => 'id']]],
+                    ],
+                ],
+            ],
+        ]);
+
+        $command = $this->app->make(DbToDbCommand::class);
+        $this->bindCommandInput($command, []);
+
+        $pipelines = $command->resolvePipelines();
         $this->assertCount(2, $pipelines);
         $this->assertSame('z_src', $pipelines[0]['source']['table']);
         $this->assertSame('a_src', $pipelines[1]['source']['table']);
     }
 
-    public function test_steps_in_tables_true_duplicate_source_across_steps_throws(): void
+    public function test_duplicate_source_across_steps_throws_when_running_all_steps(): void
     {
-        $this->applyDbtodbMapping(true, [
-            'first' => ['dup' => 't1'],
-            'second' => ['dup' => 't2'],
+        $this->applyDbtodbMigrations([
+            'default' => [
+                'source' => 'db_source',
+                'target' => 'db_target',
+                'steps' => [
+                    'first' => [
+                        'tables' => ['dup' => ['t1' => ['id' => 'id']]],
+                    ],
+                    'second' => [
+                        'tables' => ['dup' => ['t2' => ['id' => 'id']]],
+                    ],
+                ],
+            ],
         ]);
 
         $command = $this->app->make(DbToDbCommand::class);
@@ -152,22 +202,6 @@ class DbToDbTablesStepsResolutionTest extends TestCase
         $this->expectException(RuntimeException::class);
         $this->expectExceptionMessage('Duplicate source table "dup"');
 
-        $command->resolvePipelines('db_source', 'db_target');
-    }
-
-    public function test_steps_in_tables_false_flat_tables_unchanged(): void
-    {
-        $this->applyDbtodbMapping(false, [
-            'a_src' => 'a_tgt',
-            'z_src' => 'z_tgt',
-        ]);
-
-        $command = $this->app->make(DbToDbCommand::class);
-        $this->bindCommandInput($command, []);
-
-        $pipelines = $command->resolvePipelines('db_source', 'db_target');
-        $this->assertCount(2, $pipelines);
-        $this->assertSame('a_src', $pipelines[0]['source']['table']);
-        $this->assertSame('z_src', $pipelines[1]['source']['table']);
+        $command->resolvePipelines();
     }
 }
