@@ -4,7 +4,9 @@ namespace MB\DbToDb;
 
 use Illuminate\Support\ServiceProvider;
 use MB\DbToDb\Console\DbToDbCommand;
+use MB\DbToDb\Support\Database\DbToDbMappingConfigResolver;
 use MB\DbToDb\Support\Database\DbToDbMappingValidator;
+use MB\DbToDb\Support\Database\DbToDbReportWriter;
 use MB\DbToDb\Support\Database\DbToDbRoutingExecutor;
 use MB\DbToDb\Support\Database\DbToDbSourceReader;
 use MB\DbToDb\Support\Database\DbToDbTargetWriter;
@@ -20,6 +22,8 @@ class DbToDbServiceProvider extends ServiceProvider
         );
 
         $this->app->singleton(TargetTableMetadataResolver::class);
+        $this->app->singleton(DbToDbMappingConfigResolver::class);
+        $this->app->singleton(DbToDbReportWriter::class);
 
         $this->app->singleton(
             DbToDbRoutingExecutor::class,

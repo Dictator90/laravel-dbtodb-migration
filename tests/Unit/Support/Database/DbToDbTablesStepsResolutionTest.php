@@ -1,38 +1,13 @@
 <?php
 
-namespace MB\DbToDb\Tests\Unit\Console;
+namespace MB\DbToDb\Tests\Unit\Support\Database;
 
-use MB\DbToDb\Console\DbToDbCommand;
+use MB\DbToDb\Support\Database\DbToDbMappingConfigResolver;
 use MB\DbToDb\Tests\TestCase;
-use ReflectionClass;
 use RuntimeException;
-use Symfony\Component\Console\Input\ArrayInput;
 
 class DbToDbTablesStepsResolutionTest extends TestCase
 {
-    /**
-     * @param  array<string, string|bool|array<string, mixed>>  $options
-     */
-    private function bindCommandInput(DbToDbCommand $command, array $options): void
-    {
-        $input = new ArrayInput($options);
-        $input->bind($command->getDefinition());
-
-        $ref = new ReflectionClass($command);
-        while ($ref !== false) {
-            if ($ref->hasProperty('input')) {
-                $prop = $ref->getProperty('input');
-                $prop->setAccessible(true);
-                $prop->setValue($command, $input);
-
-                return;
-            }
-            $ref = $ref->getParentClass();
-        }
-
-        $this->fail('Could not bind Symfony input on DbToDbCommand.');
-    }
-
     /**
      * @param  array<string, mixed>  $migrations
      */
@@ -44,6 +19,22 @@ class DbToDbTablesStepsResolutionTest extends TestCase
         $base['runtime']['defaults']['transaction_mode'] = 'batch';
 
         config(['dbtodb_mapping' => $base]);
+    }
+
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    private function resolvePipelines(array $options = [], ?string $source = null, ?string $target = null): array
+    {
+        return (new DbToDbMappingConfigResolver())->resolvePipelinesFromConfig(
+            (array) config('dbtodb_mapping'),
+            isset($options['--migration']) ? (string) $options['--migration'] : null,
+            isset($options['--tables']) ? (string) $options['--tables'] : '',
+            isset($options['--step']) ? (string) $options['--step'] : '',
+            $source,
+            $target,
+        );
     }
 
     public function test_default_migration_is_used_when_option_is_omitted(): void
@@ -65,10 +56,7 @@ class DbToDbTablesStepsResolutionTest extends TestCase
             ],
         ]);
 
-        $command = $this->app->make(DbToDbCommand::class);
-        $this->bindCommandInput($command, []);
-
-        $pipelines = $command->resolvePipelines();
+        $pipelines = $this->resolvePipelines();
         $this->assertCount(1, $pipelines);
         $this->assertSame('z_src', $pipelines[0]['source']['table']);
         $this->assertSame('db_source', $pipelines[0]['source']['connection']);
@@ -96,10 +84,7 @@ class DbToDbTablesStepsResolutionTest extends TestCase
             ],
         ]);
 
-        $command = $this->app->make(DbToDbCommand::class);
-        $this->bindCommandInput($command, ['--migration' => 'catalog']);
-
-        $pipelines = $command->resolvePipelines();
+        $pipelines = $this->resolvePipelines(['--migration' => 'catalog']);
         $this->assertCount(1, $pipelines);
         $this->assertSame('top_banners', $pipelines[0]['source']['table']);
         $this->assertSame('legacy_mysql', $pipelines[0]['source']['connection']);
@@ -119,13 +104,10 @@ class DbToDbTablesStepsResolutionTest extends TestCase
             ],
         ]);
 
-        $command = $this->app->make(DbToDbCommand::class);
-        $this->bindCommandInput($command, ['--migration' => 'missing']);
-
         $this->expectException(RuntimeException::class);
         $this->expectExceptionMessage('Unknown migration "missing"');
 
-        $command->resolvePipelines();
+        $this->resolvePipelines(['--migration' => 'missing']);
     }
 
 
@@ -186,10 +168,7 @@ class DbToDbTablesStepsResolutionTest extends TestCase
             ],
         ]]);
 
-        $command = $this->app->make(DbToDbCommand::class);
-        $this->bindCommandInput($command, ['--tables' => 'legacy_users']);
-
-        $pipelines = $command->resolvePipelines('legacy_mysql', 'pgsql_app');
+        $pipelines = $this->resolvePipelines(['--tables' => 'legacy_users'], 'legacy_mysql', 'pgsql_app');
 
         $this->assertCount(1, $pipelines);
         $this->assertSame('legacy:source:legacy_users', $pipelines[0]['name']);
@@ -219,10 +198,7 @@ class DbToDbTablesStepsResolutionTest extends TestCase
             ],
         ]);
 
-        $command = $this->app->make(DbToDbCommand::class);
-        $this->bindCommandInput($command, ['--step' => 'second']);
-
-        $pipelines = $command->resolvePipelines();
+        $pipelines = $this->resolvePipelines(['--step' => 'second']);
         $this->assertCount(1, $pipelines);
         $this->assertSame('a_src', $pipelines[0]['source']['table']);
     }
@@ -244,10 +220,7 @@ class DbToDbTablesStepsResolutionTest extends TestCase
             ],
         ]);
 
-        $command = $this->app->make(DbToDbCommand::class);
-        $this->bindCommandInput($command, []);
-
-        $pipelines = $command->resolvePipelines();
+        $pipelines = $this->resolvePipelines();
         $this->assertCount(2, $pipelines);
         $this->assertSame('z_src', $pipelines[0]['source']['table']);
         $this->assertSame('a_src', $pipelines[1]['source']['table']);
@@ -270,12 +243,9 @@ class DbToDbTablesStepsResolutionTest extends TestCase
             ],
         ]);
 
-        $command = $this->app->make(DbToDbCommand::class);
-        $this->bindCommandInput($command, []);
-
         $this->expectException(RuntimeException::class);
         $this->expectExceptionMessage('Duplicate source table "dup"');
 
-        $command->resolvePipelines();
+        $this->resolvePipelines();
     }
 }
