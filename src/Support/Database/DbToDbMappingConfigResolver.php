@@ -33,6 +33,8 @@ class DbToDbMappingConfigResolver
             );
         }
 
+        (new DbToDbConfigValidator)->validate($mappingConfig);
+
         $migrationName = $migrationOption ?? 'default';
         $migrationConfig = $this->resolveMigrationConfig($mappingConfig, $migrationName);
         $this->assertNoConflictingLegacyTableModes($mappingConfig, $migrationConfig, $migrationName, $migrationOption !== null, $stepOption);
