@@ -25,7 +25,7 @@ class DbToDbRoutingExecutorTransformRulesTest extends TestCase
         return $m->invoke($executor, $value, $definition, $sourceRow);
     }
 
-    public function test_multiply_then_round_precision_matches_legacy_yii_course_27(): void
+    public function test_multiply_then_round_precision_applies_course_27(): void
     {
         $definition = [
             ['rule' => 'multiply', 'by' => 27],

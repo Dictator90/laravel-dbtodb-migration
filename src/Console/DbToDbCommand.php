@@ -17,13 +17,12 @@ use Throwable;
 class DbToDbCommand extends Command
 {
     protected $signature = 'db:to-db
-        {--tables= : Comma-separated source tables from config/dbtodb_mapping.php}
+        {--m|migration= : Named migration key from dbtodb_mapping.migrations (default: default)}
+        {--tables= : Comma-separated source tables from the selected migration}
         {--dry-run : Validate and read data without writing}
         {--continue-on-error : Continue processing on per-pipeline failure}
         {--report-file= : Write JSON report file}
-        {--source=source : Source database connection}
-        {--target=target : Target database connection}
-        {--step= : When runtime.steps_in_tables is true, run only this step key (omit to run all steps in order)}
+        {--step= : Run only this step key from the selected migration steps (omit to run all steps in order)}
         {--profile : Log per-pipeline and per-chunk timings to the log channel named in dbtodb_mapping.profile_logging}';
 
     protected $description = 'Universal database-to-database data routing command (1 source -> N targets).';
@@ -35,6 +34,18 @@ class DbToDbCommand extends Command
         parent::__construct();
     }
 
+    private function stringOptionOrNull(string $name): ?string
+    {
+        $value = $this->option($name);
+        if ($value === null) {
+            return null;
+        }
+
+        $value = trim((string) $value);
+
+        return $value === '' ? null : $value;
+    }
+
     public function handle(): int
     {
         try {
@@ -42,16 +53,18 @@ class DbToDbCommand extends Command
 
             $dryRun = (bool) $this->option('dry-run');
             $continueOnError = (bool) $this->option('continue-on-error');
-            $source = (string) $this->option('source');
-            $target = (string) $this->option('target');
             $reportFileOption = (string) ($this->option('report-file') ?? '');
 
-            $pipelines = $this->resolvePipelines($source, $target);
+            $pipelines = $this->resolvePipelines();
             if ($pipelines === []) {
                 $this->warn('No pipelines selected for execution.');
 
                 return self::SUCCESS;
             }
+
+            $resolvedSource = (string) Arr::get($pipelines[0], 'source.connection', '');
+            $resolvedTarget = (string) Arr::get($pipelines[0], 'targets.0.connection', '');
+            $migrationName = $this->resolveMigrationName();
 
             $profile = (bool) $this->option('profile');
             if ($profile) {
@@ -62,8 +75,9 @@ class DbToDbCommand extends Command
                 $sourceTables = array_values(array_filter($sourceTables, static fn (string $t): bool => $t !== ''));
 
                 Log::channel(ProfileLoggingChannel::resolve())->info('db_to_db.command.start', [
-                    'source' => $source,
-                    'target' => $target,
+                    'source' => $resolvedSource,
+                    'target' => $resolvedTarget,
+                    'migration' => $migrationName,
                     'pipelines_count' => count($pipelines),
                     'dry_run' => $dryRun,
                     'continue_on_error' => $continueOnError,
@@ -76,16 +90,14 @@ class DbToDbCommand extends Command
                 ));
             }
 
-            $stepLine = '';
-            if (filter_var(config('dbtodb_mapping.runtime.steps_in_tables', false), FILTER_VALIDATE_BOOLEAN)) {
-                $stepOpt = trim((string) ($this->option('step') ?? ''));
-                $stepLine = $stepOpt !== ''
-                    ? sprintf(' step=%s', $stepOpt)
-                    : ' steps=all';
-            }
+            $stepOpt = trim((string) ($this->option('step') ?? ''));
+            $stepLine = $stepOpt !== '' ? sprintf(' step=%s', $stepOpt) : '';
 
             $this->info(sprintf(
-                'Starting db-to-db routing: pipelines=%d dry-run=%s continue-on-error=%s%s',
+                'Starting db-to-db routing: migration=%s source=%s target=%s pipelines=%d dry-run=%s continue-on-error=%s%s',
+                $migrationName,
+                $resolvedSource,
+                $resolvedTarget,
                 count($pipelines),
                 $dryRun ? 'yes' : 'no',
                 $continueOnError ? 'yes' : 'no',
@@ -163,14 +175,14 @@ class DbToDbCommand extends Command
             $syncDefinitions = [];
             if ($syncSerial && ! $dryRun && $failedCount === 0) {
                 if ($syncTablesRaw === []) {
-                    $syncDefinitions = $this->resolveAutoIncrementSyncFromPipelines($pipelines, $target);
+                    $syncDefinitions = $this->resolveAutoIncrementSyncFromPipelines($pipelines, $resolvedTarget);
                 } else {
                     $syncDefinitions = $this->normalizeSyncSerialSequenceTablesConfig($syncTablesRaw);
                 }
             }
 
             if ($syncSerial && ! $dryRun && $syncDefinitions !== [] && $failedCount === 0) {
-                $driver = DB::connection($target)->getDriverName();
+                $driver = DB::connection($resolvedTarget)->getDriverName();
                 $supportedDrivers = ['pgsql', 'mysql', 'mariadb', 'sqlite', 'sqlsrv'];
                 if (in_array($driver, $supportedDrivers, true)) {
                     $onSkip = $this->output->isVerbose()
@@ -178,11 +190,11 @@ class DbToDbCommand extends Command
                             $this->comment($message);
                         }
                         : null;
-                    $this->autoIncrementSynchronizer->sync($target, $syncDefinitions, $onSkip);
+                    $this->autoIncrementSynchronizer->sync($resolvedTarget, $syncDefinitions, $onSkip);
                     $this->info(sprintf(
                         'Auto-increment / sequences synchronized for %d table(s) on connection "%s".',
                         count($syncDefinitions),
-                        $target,
+                        $resolvedTarget,
                     ));
                 } elseif ($this->output->isVerbose()) {
                     $this->comment(sprintf(
@@ -191,7 +203,7 @@ class DbToDbCommand extends Command
                     ));
                 }
             } elseif ($syncSerial && ! $dryRun && $syncTablesRaw === [] && $failedCount === 0 && $syncDefinitions === [] && $this->output->isVerbose()) {
-                $this->comment('sync_serial_sequences is enabled but no target tables were resolved for this run (check pipelines / --target).');
+                $this->comment('sync_serial_sequences is enabled but no target tables were resolved for this run (check pipelines / selected migration target).');
             }
 
             $headers = ['pipeline', 'status', 'source_table', 'target_table', 'read', 'written', 'reason'];
@@ -221,82 +233,100 @@ class DbToDbCommand extends Command
     /**
      * @return list<array<string, mixed>>
      */
-    public function resolvePipelines(string $source, string $target): array
+    public function resolvePipelines(): array
     {
-        return $this->resolvePipelinesFromConfig($source, $target);
+        return $this->resolvePipelinesFromConfig();
     }
 
     /**
      * @return list<array<string, mixed>>
      */
-    private function resolvePipelinesFromConfig(string $source, string $target): array
+    private function resolvePipelinesFromConfig(): array
     {
         $mappingConfig = (array) config('dbtodb_mapping');
-        $tablesRoot = $this->resolveTablesRootForPipelines($mappingConfig);
-        $mappingConfig['tables'] = $tablesRoot;
+        $migrationName = $this->resolveMigrationName();
+        $migrationConfig = $this->resolveMigrationConfig($mappingConfig, $migrationName);
+        $tablesRoot = $this->resolveTablesRootForPipelines($migrationConfig, $migrationName);
+
+        $source = trim((string) Arr::get($migrationConfig, 'source', ''));
+        $target = trim((string) Arr::get($migrationConfig, 'target', ''));
+        if ($source === '') {
+            throw new RuntimeException(sprintf(
+                'Migration "%s": source connection is required (set dbtodb_mapping.migrations.%s.source).',
+                $migrationName,
+                $migrationName,
+            ));
+        }
+        if ($target === '') {
+            throw new RuntimeException(sprintf(
+                'Migration "%s": target connection is required (set dbtodb_mapping.migrations.%s.target).',
+                $migrationName,
+                $migrationName,
+            ));
+        }
 
         $allowedSourceTables = array_keys($tablesRoot);
         $tables = $this->resolveTables($allowedSourceTables, (string) ($this->option('tables') ?? ''));
 
-        $strict = (bool) config('dbtodb_mapping.strict', true);
-        $defaultChunk = (int) Arr::get($mappingConfig, 'runtime.defaults.chunk', 1000);
+        $strict = (bool) Arr::get($migrationConfig, 'strict', config('dbtodb_mapping.strict', true));
+        $defaultChunk = (int) Arr::get($migrationConfig, 'runtime.defaults.chunk', Arr::get($mappingConfig, 'runtime.defaults.chunk', 1000));
         if ($defaultChunk < 1) {
-            throw new RuntimeException('Invalid dbtodb_mapping.runtime.defaults.chunk, expected integer >= 1.');
+            throw new RuntimeException('Invalid runtime.defaults.chunk, expected integer >= 1.');
         }
 
-        $defaultTransactionMode = (string) Arr::get($mappingConfig, 'runtime.defaults.transaction_mode', 'batch');
+        $defaultTransactionMode = (string) Arr::get(
+            $migrationConfig,
+            'runtime.defaults.transaction_mode',
+            Arr::get($mappingConfig, 'runtime.defaults.transaction_mode', 'batch')
+        );
         if (! in_array($defaultTransactionMode, ['atomic', 'batch'], true)) {
-            throw new RuntimeException('Invalid dbtodb_mapping.runtime.defaults.transaction_mode, expected "atomic" or "batch".');
+            throw new RuntimeException('Invalid runtime.defaults.transaction_mode, expected "atomic" or "batch".');
         }
 
         $pipelines = [];
         foreach ($tables as $table) {
-            $targetTables = $this->normalizeTargetTables($mappingConfig, $table);
+            $tableDefinition = $this->normalizeMigrationTableDefinition($tablesRoot[$table] ?? null, $table);
+            $targetTables = array_keys($tableDefinition['targets']);
+            $sourceFilters = (array) ($tableDefinition['source']['filters'] ?? []);
 
             $targets = [];
-            $filterResolution = $this->resolveFiltersForTable($mappingConfig, $table, $targetTables);
             foreach ($targetTables as $targetTable) {
-                $map = Arr::get($mappingConfig, sprintf('columns.%s.%s', $table, $targetTable), []);
+                $targetConfig = $tableDefinition['targets'][$targetTable];
+                $map = $targetConfig['columns'] ?? [];
                 if (! is_array($map)) {
                     throw new RuntimeException(sprintf(
-                        'Invalid columns mapping for "%s" -> "%s". Expected columns.%s.%s array.',
+                        'Invalid columns mapping for "%s" -> "%s". Expected columns array.',
                         $table,
                         $targetTable,
-                        $table,
-                        $targetTable
                     ));
                 }
                 if (count($targetTables) > 1 && $map === []) {
                     throw new RuntimeException(sprintf(
-                        'Missing columns mapping for "%s" -> "%s". Expected columns.%s.%s array for multi-target routing.',
+                        'Missing columns mapping for "%s" -> "%s". Expected non-empty columns array for multi-target routing.',
                         $table,
                         $targetTable,
-                        $table,
-                        $targetTable
                     ));
                 }
 
-                $transforms = $this->resolveTransformsForTarget($mappingConfig, $table, $targetTable, $targetTables);
+                $transforms = $targetConfig['transforms'] ?? [];
                 if (! is_array($transforms)) {
                     throw new RuntimeException(sprintf(
-                        'Invalid transforms mapping for "%s" -> "%s". Expected transforms.%s.%s array.',
+                        'Invalid transforms mapping for "%s" -> "%s". Expected transforms array.',
                         $table,
                         $targetTable,
-                        $table,
-                        $targetTable
                     ));
                 }
 
                 $targetDef = [
                     'connection' => $target,
                     'table' => $targetTable,
-                    'operation' => 'upsert',
+                    'operation' => (string) ($targetConfig['operation'] ?? 'upsert'),
                     'map' => $map,
                     'transforms' => $transforms,
-                    'filters' => $filterResolution['targets'][$targetTable] ?? [],
+                    'filters' => $targetConfig['filters'] ?? [],
                 ];
 
-                $upsertKeys = $this->resolveUpsertKeysForTarget($mappingConfig, $table, $targetTable);
+                $upsertKeys = $this->normalizeStringList($targetConfig['upsert_keys'] ?? []);
                 if ($upsertKeys !== []) {
                     $targetDef['keys'] = $upsertKeys;
                 }
@@ -304,37 +334,34 @@ class DbToDbCommand extends Command
                 $targets[] = $targetDef;
             }
 
-            $tableChunk = (int) Arr::get($mappingConfig, sprintf('runtime.tables.%s.chunk', $table), $defaultChunk);
+            $tableRuntime = (array) ($tableDefinition['source']['runtime'] ?? []);
+            $tableChunk = (int) Arr::get($tableRuntime, 'chunk', $defaultChunk);
             if ($tableChunk < 1) {
                 throw new RuntimeException(sprintf(
-                    'Invalid dbtodb_mapping.runtime.tables.%s.chunk, expected integer >= 1.',
+                    'Invalid runtime chunk for source table "%s", expected integer >= 1.',
                     $table
                 ));
             }
 
-            $tableTransactionMode = (string) Arr::get(
-                $mappingConfig,
-                sprintf('runtime.tables.%s.transaction_mode', $table),
-                $defaultTransactionMode
-            );
+            $tableTransactionMode = (string) Arr::get($tableRuntime, 'transaction_mode', $defaultTransactionMode);
             if (! in_array($tableTransactionMode, ['atomic', 'batch'], true)) {
                 throw new RuntimeException(sprintf(
-                    'Invalid dbtodb_mapping.runtime.tables.%s.transaction_mode, expected "atomic" or "batch".',
+                    'Invalid runtime transaction_mode for source table "%s", expected "atomic" or "batch".',
                     $table
                 ));
             }
 
-            $keysetColumn = trim((string) Arr::get($mappingConfig, sprintf('runtime.tables.%s.keyset_column', $table), ''));
+            $keysetColumn = trim((string) Arr::get($tableRuntime, 'keyset_column', ''));
             if ($keysetColumn !== '' && ! preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*$/', $keysetColumn)) {
                 throw new RuntimeException(sprintf(
-                    'Invalid dbtodb_mapping.runtime.tables.%s.keyset_column, expected identifier pattern.',
+                    'Invalid runtime keyset_column for source table "%s", expected identifier pattern.',
                     $table
                 ));
             }
 
             $sourceSelect = $this->resolveSourceSelectFromMapping(
                 $targets,
-                $filterResolution['source'] ?? [],
+                $sourceFilters,
                 $keysetColumn,
             );
 
@@ -342,7 +369,7 @@ class DbToDbCommand extends Command
                 'connection' => $source,
                 'table' => $table,
                 'chunk' => $tableChunk,
-                'filters' => $filterResolution['source'],
+                'filters' => $sourceFilters,
             ];
             if ($keysetColumn !== '') {
                 $sourceDef['keyset_column'] = $keysetColumn;
@@ -352,7 +379,7 @@ class DbToDbCommand extends Command
             }
 
             $pipelines[] = [
-                'name' => 'source:'.$table,
+                'name' => $migrationName.':source:'.$table,
                 'strict' => $strict,
                 'transaction_mode' => $tableTransactionMode,
                 'source' => $sourceDef,
@@ -363,124 +390,313 @@ class DbToDbCommand extends Command
         return $pipelines;
     }
 
-    /**
-     * Flatten {@see $mappingConfig} `tables` for the current CLI `--step` and `runtime.steps_in_tables`.
-     *
-     * @param  array<string, mixed>  $mappingConfig
-     * @return array<string, mixed>
-     */
-    private function resolveTablesRootForPipelines(array $mappingConfig): array
+    private function resolveMigrationName(): string
     {
-        $step = trim((string) ($this->option('step') ?? ''));
-        $stepsInTables = filter_var(
-            Arr::get($mappingConfig, 'runtime.steps_in_tables', false),
-            FILTER_VALIDATE_BOOLEAN
-        );
+        $name = $this->stringOptionOrNull('migration') ?? 'default';
 
-        $raw = $mappingConfig['tables'] ?? [];
-        if (! is_array($raw)) {
-            throw new RuntimeException('Invalid dbtodb_mapping.tables: expected array.');
-        }
-
-        if (! $stepsInTables) {
-            if ($step !== '') {
-                throw new RuntimeException(
-                    'The --step option is only valid when dbtodb_mapping.runtime.steps_in_tables is true.'
-                );
-            }
-
-            return $raw;
-        }
-
-        if ($raw === []) {
-            throw new RuntimeException(
-                'Invalid dbtodb_mapping.tables: expected non-empty array when runtime.steps_in_tables is true.'
-            );
-        }
-
-        if (array_is_list($raw)) {
-            throw new RuntimeException(
-                'When dbtodb_mapping.runtime.steps_in_tables is true, tables must be a map of step keys (e.g. first, second), not a list.'
-            );
-        }
-
-        if ($step !== '') {
-            if (! array_key_exists($step, $raw)) {
-                throw new RuntimeException(sprintf(
-                    'Unknown step "%s". Available steps: %s.',
-                    $step,
-                    implode(', ', array_keys($raw))
-                ));
-            }
-
-            $inner = $raw[$step];
-            if (! is_array($inner) || $inner === []) {
-                throw new RuntimeException(sprintf(
-                    'Invalid dbtodb_mapping.tables step "%s": expected non-empty array of source => target mappings.',
-                    $step
-                ));
-            }
-            if (array_is_list($inner)) {
-                throw new RuntimeException(sprintf(
-                    'Invalid dbtodb_mapping.tables step "%s": inner map must use source table names as keys, not a list.',
-                    $step
-                ));
-            }
-
-            return $this->validateFlatTablesLeaf($inner, $step);
-        }
-
-        $merged = [];
-        foreach ($raw as $stepName => $inner) {
-            if (! is_string($stepName) || trim($stepName) === '') {
-                throw new RuntimeException(
-                    'When dbtodb_mapping.runtime.steps_in_tables is true, every step key must be a non-empty string.'
-                );
-            }
-            if (! is_array($inner) || $inner === []) {
-                throw new RuntimeException(sprintf(
-                    'Invalid dbtodb_mapping.tables step "%s": expected non-empty array of source => target mappings.',
-                    $stepName
-                ));
-            }
-            if (array_is_list($inner)) {
-                throw new RuntimeException(sprintf(
-                    'Invalid dbtodb_mapping.tables step "%s": inner map must use source table names as keys, not a list.',
-                    $stepName
-                ));
-            }
-            $inner = $this->validateFlatTablesLeaf($inner, $stepName);
-            foreach ($inner as $sourceTable => $targets) {
-                if (array_key_exists($sourceTable, $merged)) {
-                    throw new RuntimeException(sprintf(
-                        'Duplicate source table "%s" under step "%s" and an earlier step. Use --step to run one step, or remove the duplicate.',
-                        $sourceTable,
-                        $stepName
-                    ));
-                }
-                $merged[$sourceTable] = $targets;
-            }
-        }
-
-        return $merged;
+        return $name === '' ? 'default' : $name;
     }
 
     /**
-     * @param  array<string, mixed>  $leaf
+     * @param  array<string, mixed>  $mappingConfig
      * @return array<string, mixed>
      */
-    private function validateFlatTablesLeaf(array $leaf, string $stepLabel): array
+    private function resolveMigrationConfig(array $mappingConfig, string $migrationName): array
     {
-        foreach ($leaf as $sourceTable => $targets) {
-            if (! is_string($sourceTable) || trim($sourceTable) === '') {
+        $migrations = $mappingConfig['migrations'] ?? null;
+        if (! is_array($migrations) || $migrations === []) {
+            throw new RuntimeException('Invalid dbtodb_mapping.migrations: expected non-empty array with at least the "default" migration.');
+        }
+
+        if (! array_key_exists($migrationName, $migrations)) {
+            throw new RuntimeException(sprintf(
+                'Unknown migration "%s". Available migrations: %s.',
+                $migrationName,
+                implode(', ', array_keys($migrations)),
+            ));
+        }
+
+        $migration = $migrations[$migrationName];
+        if (! is_array($migration)) {
+            throw new RuntimeException(sprintf('Invalid dbtodb_mapping.migrations.%s: expected array.', $migrationName));
+        }
+
+        return $migration;
+    }
+
+    /**
+     * @param  array<string, mixed>  $migrationConfig
+     * @return array<string, mixed>
+     */
+    private function resolveTablesRootForPipelines(array $migrationConfig, string $migrationName): array
+    {
+        $step = trim((string) ($this->option('step') ?? ''));
+
+        if (array_key_exists('steps', $migrationConfig)) {
+            $steps = $migrationConfig['steps'];
+            if (! is_array($steps) || $steps === [] || array_is_list($steps)) {
                 throw new RuntimeException(sprintf(
-                    'Invalid source table key under step "%s": expected non-empty string.',
-                    $stepLabel
+                    'Invalid dbtodb_mapping.migrations.%s.steps: expected non-empty map of step names.',
+                    $migrationName,
                 ));
+            }
+
+            if ($step !== '') {
+                if (! array_key_exists($step, $steps)) {
+                    throw new RuntimeException(sprintf(
+                        'Unknown step "%s" for migration "%s". Available steps: %s.',
+                        $step,
+                        $migrationName,
+                        implode(', ', array_keys($steps)),
+                    ));
+                }
+
+                return $this->extractStepTables($steps[$step], $migrationName, $step);
+            }
+
+            $merged = [];
+            foreach ($steps as $stepName => $stepConfig) {
+                if (! is_string($stepName) || trim($stepName) === '') {
+                    throw new RuntimeException(sprintf(
+                        'Invalid dbtodb_mapping.migrations.%s.steps: every step key must be a non-empty string.',
+                        $migrationName,
+                    ));
+                }
+
+                foreach ($this->extractStepTables($stepConfig, $migrationName, $stepName) as $sourceTable => $definition) {
+                    if (array_key_exists($sourceTable, $merged)) {
+                        throw new RuntimeException(sprintf(
+                            'Duplicate source table "%s" in migration "%s". Use --step to run one step, or remove the duplicate.',
+                            $sourceTable,
+                            $migrationName,
+                        ));
+                    }
+                    $merged[$sourceTable] = $definition;
+                }
+            }
+
+            return $merged;
+        }
+
+        if ($step !== '') {
+            throw new RuntimeException(sprintf(
+                'The --step option requires dbtodb_mapping.migrations.%s.steps.',
+                $migrationName,
+            ));
+        }
+
+        $tables = $migrationConfig['tables'] ?? [];
+        if (! is_array($tables) || $tables === [] || array_is_list($tables)) {
+            throw new RuntimeException(sprintf(
+                'Invalid dbtodb_mapping.migrations.%s.tables: expected non-empty map of source tables.',
+                $migrationName,
+            ));
+        }
+
+        return $this->validateSourceTableMap($tables, sprintf('migrations.%s.tables', $migrationName));
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function extractStepTables(mixed $stepConfig, string $migrationName, string $stepName): array
+    {
+        if (! is_array($stepConfig)) {
+            throw new RuntimeException(sprintf(
+                'Invalid dbtodb_mapping.migrations.%s.steps.%s: expected array.',
+                $migrationName,
+                $stepName,
+            ));
+        }
+
+        $tables = $stepConfig['tables'] ?? $stepConfig;
+        if (! is_array($tables) || $tables === [] || array_is_list($tables)) {
+            throw new RuntimeException(sprintf(
+                'Invalid dbtodb_mapping.migrations.%s.steps.%s.tables: expected non-empty map of source tables.',
+                $migrationName,
+                $stepName,
+            ));
+        }
+
+        return $this->validateSourceTableMap($tables, sprintf('migrations.%s.steps.%s.tables', $migrationName, $stepName));
+    }
+
+    /**
+     * @param  array<string, mixed>  $tables
+     * @return array<string, mixed>
+     */
+    private function validateSourceTableMap(array $tables, string $path): array
+    {
+        foreach ($tables as $sourceTable => $_definition) {
+            if (! is_string($sourceTable) || trim($sourceTable) === '') {
+                throw new RuntimeException(sprintf('Invalid dbtodb_mapping.%s: every source table key must be a non-empty string.', $path));
             }
         }
 
-        return $leaf;
+        return $tables;
+    }
+
+    /**
+     * @return array{source: array<string, mixed>, targets: array<string, array<string, mixed>>}
+     */
+    private function normalizeMigrationTableDefinition(mixed $definition, string $sourceTable): array
+    {
+        if (! is_array($definition) || $definition === [] || array_is_list($definition)) {
+            throw new RuntimeException(sprintf(
+                'Invalid table definition for source "%s": expected target map or full table definition array.',
+                $sourceTable,
+            ));
+        }
+
+        $source = [
+            'filters' => [],
+            'runtime' => [],
+        ];
+
+        if (isset($definition['source'])) {
+            if (! is_array($definition['source'])) {
+                throw new RuntimeException(sprintf('Invalid source definition for table "%s": expected array.', $sourceTable));
+            }
+            $source['filters'] = $definition['source']['filters'] ?? [];
+            $source['runtime'] = $this->normalizeRuntimeDefinition($definition['source']);
+        }
+
+        if (array_key_exists('filters', $definition)) {
+            $source['filters'] = $definition['filters'];
+        }
+        if (array_key_exists('runtime', $definition) && is_array($definition['runtime'])) {
+            $source['runtime'] = array_replace($source['runtime'], $definition['runtime']);
+        }
+        foreach (['chunk', 'transaction_mode', 'keyset_column'] as $runtimeKey) {
+            if (array_key_exists($runtimeKey, $definition)) {
+                $source['runtime'][$runtimeKey] = $definition[$runtimeKey];
+            }
+        }
+
+        $targetsNode = $definition['targets'] ?? null;
+        if ($targetsNode === null) {
+            $targetsNode = array_diff_key($definition, array_flip([
+                'source',
+                'filters',
+                'runtime',
+                'chunk',
+                'transaction_mode',
+                'keyset_column',
+            ]));
+        }
+
+        if (! is_array($targetsNode) || $targetsNode === [] || array_is_list($targetsNode)) {
+            throw new RuntimeException(sprintf('Invalid targets for source "%s": expected non-empty target map.', $sourceTable));
+        }
+
+        $targets = [];
+        foreach ($targetsNode as $targetTable => $targetDefinition) {
+            if (! is_string($targetTable) || trim($targetTable) === '') {
+                throw new RuntimeException(sprintf('Invalid target key for source "%s": expected non-empty string.', $sourceTable));
+            }
+            $targets[trim($targetTable)] = $this->normalizeTargetDefinition($targetDefinition, $sourceTable, trim($targetTable));
+        }
+
+        return ['source' => $source, 'targets' => $targets];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function normalizeRuntimeDefinition(array $definition): array
+    {
+        $runtime = [];
+        if (isset($definition['runtime']) && is_array($definition['runtime'])) {
+            $runtime = $definition['runtime'];
+        }
+        foreach (['chunk', 'transaction_mode', 'keyset_column'] as $runtimeKey) {
+            if (array_key_exists($runtimeKey, $definition)) {
+                $runtime[$runtimeKey] = $definition[$runtimeKey];
+            }
+        }
+
+        return $runtime;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function normalizeTargetDefinition(mixed $definition, string $sourceTable, string $targetTable): array
+    {
+        if ($definition === null) {
+            return ['columns' => []];
+        }
+
+        if (! is_array($definition)) {
+            throw new RuntimeException(sprintf(
+                'Invalid target definition for "%s" -> "%s": expected array.',
+                $sourceTable,
+                $targetTable,
+            ));
+        }
+
+        $reserved = ['columns', 'transforms', 'filters', 'upsert_keys', 'operation'];
+        $hasFullShape = false;
+        foreach ($reserved as $key) {
+            if (array_key_exists($key, $definition)) {
+                $hasFullShape = true;
+                break;
+            }
+        }
+
+        if (! $hasFullShape) {
+            return ['columns' => $definition];
+        }
+
+        $target = $definition;
+        $target['columns'] = $definition['columns'] ?? [];
+
+        return $target;
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function normalizeStringList(mixed $value): array
+    {
+        if (! is_array($value)) {
+            return [];
+        }
+
+        return array_values(array_filter(
+            array_map(static fn (mixed $item): string => is_string($item) ? trim($item) : '', $value),
+            static fn (string $item): bool => $item !== '',
+        ));
+    }
+
+    /**
+     * @param  list<string>  $allowedTables
+     * @return list<string>
+     */
+    private function resolveTables(array $allowedTables, string $tablesOption): array
+    {
+        if (trim($tablesOption) === '') {
+            return $allowedTables;
+        }
+
+        $requestedTables = $this->parseListOption($tablesOption);
+        $unknown = array_values(array_diff($requestedTables, $allowedTables));
+        if ($unknown !== []) {
+            throw new RuntimeException('Unknown or disallowed tables: '.implode(', ', $unknown));
+        }
+
+        return $requestedTables;
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function parseListOption(string $value): array
+    {
+        return array_values(array_filter(array_map(
+            static fn (string $entry): string => trim($entry),
+            explode(',', $value),
+        )));
     }
 
     /**
@@ -499,20 +715,17 @@ class DbToDbCommand extends Command
         $merged = [];
         $hasNonEmptyMap = false;
         foreach ($targets as $target) {
-            if (! is_array($target)) {
-                continue;
-            }
             $map = $target['map'] ?? [];
             if ($map !== []) {
                 $hasNonEmptyMap = true;
             }
-            foreach (array_keys($map) as $k) {
-                if (! is_string($k)) {
+            foreach (array_keys((array) $map) as $key) {
+                if (! is_string($key)) {
                     continue;
                 }
-                $sk = trim($k);
-                if ($sk !== '' && preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*$/', $sk)) {
-                    $merged[$sk] = true;
+                $sourceColumn = trim($key);
+                if ($sourceColumn !== '' && preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*$/', $sourceColumn)) {
+                    $merged[$sourceColumn] = true;
                 }
             }
         }
@@ -521,15 +734,12 @@ class DbToDbCommand extends Command
             return null;
         }
 
-        foreach ($this->collectFilterColumnNamesFromRules($sourceFilters) as $c) {
-            $merged[$c] = true;
+        foreach ($this->collectFilterColumnNamesFromRules($sourceFilters) as $column) {
+            $merged[$column] = true;
         }
         foreach ($targets as $target) {
-            if (! is_array($target)) {
-                continue;
-            }
-            foreach ($this->collectFilterColumnNamesFromRules($target['filters'] ?? []) as $c) {
-                $merged[$c] = true;
+            foreach ($this->collectFilterColumnNamesFromRules($target['filters'] ?? []) as $column) {
+                $merged[$column] = true;
             }
         }
 
@@ -537,10 +747,10 @@ class DbToDbCommand extends Command
             $merged[$keysetColumn] = true;
         }
 
-        $keys = array_keys($merged);
-        sort($keys, SORT_STRING);
+        $columns = array_keys($merged);
+        sort($columns, SORT_STRING);
 
-        return $keys;
+        return $columns;
     }
 
     /**
@@ -551,14 +761,10 @@ class DbToDbCommand extends Command
     {
         $names = [];
         foreach ($this->normalizeFilterRulesForColumnHarvest($filters) as $filter) {
-            if (! is_array($filter)) {
-                continue;
+            $column = trim((string) ($filter['column'] ?? ''));
+            if ($column !== '' && preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*$/', $column)) {
+                $names[$column] = true;
             }
-            $col = trim((string) ($filter['column'] ?? ''));
-            if ($col === '' || ! preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*$/', $col)) {
-                continue;
-            }
-            $names[$col] = true;
         }
 
         return array_keys($names);
@@ -593,200 +799,6 @@ class DbToDbCommand extends Command
     }
 
     /**
-     * Optional upsert conflict columns for targets that lack a discoverable PK or need an override.
-     *
-     * Formats:
-     * - upsert_keys[source] = ['col1', 'col2'] — same keys for every target of this source
-     * - upsert_keys[source][target] = ['col1'] — per target (multi-target pipelines)
-     *
-     * @param  array<string, mixed>  $mappingConfig
-     * @return list<string>
-     */
-    private function resolveUpsertKeysForTarget(array $mappingConfig, string $sourceTable, string $targetTable): array
-    {
-        $node = Arr::get($mappingConfig, sprintf('upsert_keys.%s', $sourceTable));
-        if (! is_array($node) || $node === []) {
-            return [];
-        }
-
-        if (array_is_list($node)) {
-            return array_values(array_filter(
-                array_map(static fn (mixed $v): string => is_string($v) ? trim($v) : '', $node),
-                static fn (string $s): bool => $s !== '',
-            ));
-        }
-
-        $specific = $node[$targetTable] ?? null;
-        if (! is_array($specific)) {
-            return [];
-        }
-
-        return array_values(array_filter(
-            array_map(static fn (mixed $v): string => is_string($v) ? trim($v) : '', $specific),
-            static fn (string $s): bool => $s !== '',
-        ));
-    }
-
-    private function normalizeTargetTables(array $mappingConfig, string $table): array
-    {
-        $raw = Arr::get($mappingConfig, 'tables.'.$table);
-
-        if (is_string($raw) && trim($raw) !== '') {
-            return [$raw];
-        }
-
-        if (! is_array($raw) || $raw === []) {
-            throw new RuntimeException(sprintf(
-                'Invalid dbtodb_mapping.tables for "%s": expected non-empty string or array of target tables.',
-                $table
-            ));
-        }
-
-        $normalized = [];
-        foreach ($raw as $targetTable) {
-            if (! is_string($targetTable) || trim($targetTable) === '') {
-                throw new RuntimeException(sprintf(
-                    'Invalid dbtodb_mapping.tables for "%s": every target table must be non-empty string.',
-                    $table
-                ));
-            }
-            $normalized[] = $targetTable;
-        }
-
-        return $normalized;
-    }
-
-    /**
-     * @param  list<string>  $allowedTables
-     * @return list<string>
-     */
-    private function resolveTables(array $allowedTables, string $tablesOption): array
-    {
-        if (trim($tablesOption) === '') {
-            return $allowedTables;
-        }
-
-        $requestedTables = $this->parseListOption($tablesOption);
-        $unknown = array_values(array_diff($requestedTables, $allowedTables));
-        if ($unknown !== []) {
-            throw new RuntimeException('Unknown or disallowed tables: '.implode(', ', $unknown));
-        }
-
-        return $requestedTables;
-    }
-
-    /**
-     * @return list<string>
-     */
-    private function parseListOption(string $value): array
-    {
-        return array_values(array_filter(array_map(
-            static fn (string $entry): string => trim($entry),
-            explode(',', $value),
-        )));
-    }
-
-    /**
-     * @param  array<string, mixed>  $mappingConfig
-     * @param  list<string>  $targetTables
-     * @return array{
-     *   source: array<int|string, mixed>,
-     *   targets: array<string, array<int|string, mixed>>
-     * }
-     */
-    private function resolveFiltersForTable(array $mappingConfig, string $table, array $targetTables): array
-    {
-        $raw = Arr::get($mappingConfig, 'filters.'.$table, []);
-        if (! is_array($raw)) {
-            throw new RuntimeException(sprintf('Invalid filters for "%s": expected array.', $table));
-        }
-
-        $targetTableSet = array_fill_keys($targetTables, true);
-        $usesPerTargetShape = array_key_exists('default', $raw);
-        if (! $usesPerTargetShape) {
-            foreach (array_keys($raw) as $key) {
-                if (is_string($key) && array_key_exists($key, $targetTableSet)) {
-                    $usesPerTargetShape = true;
-                    break;
-                }
-            }
-        }
-
-        if (! $usesPerTargetShape) {
-            return [
-                'source' => $raw,
-                'targets' => [],
-            ];
-        }
-
-        $defaultRules = $raw['default'] ?? [];
-        if (! is_array($defaultRules)) {
-            throw new RuntimeException(sprintf(
-                'Invalid filters.%s.default: expected rules array.',
-                $table
-            ));
-        }
-
-        $targetFilters = [];
-        foreach ($targetTables as $targetTable) {
-            $rules = $raw[$targetTable] ?? $defaultRules;
-            if (! is_array($rules)) {
-                throw new RuntimeException(sprintf(
-                    'Invalid filters.%s.%s: expected rules array.',
-                    $table,
-                    $targetTable
-                ));
-            }
-            $targetFilters[$targetTable] = $rules;
-        }
-
-        return [
-            'source' => [],
-            'targets' => $targetFilters,
-        ];
-    }
-
-    /**
-     * @param  array<string, mixed>  $mappingConfig
-     * @return array<string, mixed>
-     */
-    private function resolveTransformsForTarget(array $mappingConfig, string $sourceTable, string $targetTable, array $knownTargetTables): array
-    {
-        $tableTransforms = Arr::get($mappingConfig, sprintf('transforms.%s', $sourceTable), []);
-        if (! is_array($tableTransforms)) {
-            throw new RuntimeException(sprintf(
-                'Invalid transforms for "%s": expected array.',
-                $sourceTable
-            ));
-        }
-
-        $targetTransforms = Arr::get($tableTransforms, $targetTable, []);
-        if ($targetTransforms !== [] && ! is_array($targetTransforms)) {
-            throw new RuntimeException(sprintf(
-                'Invalid transforms mapping for "%s" -> "%s". Expected transforms.%s.%s array.',
-                $sourceTable,
-                $targetTable,
-                $sourceTable,
-                $targetTable
-            ));
-        }
-
-        $knownTargets = array_fill_keys($knownTargetTables, true);
-        $tableLevelTransforms = [];
-        foreach ($tableTransforms as $key => $value) {
-            if (is_string($key) && array_key_exists($key, $knownTargets)) {
-                continue;
-            }
-            $tableLevelTransforms[$key] = $value;
-        }
-
-        return array_merge($tableLevelTransforms, is_array($targetTransforms) ? $targetTransforms : []);
-    }
-
-    /**
-     * @param  array<string, mixed>  $report
-     */
-    /**
      * @param  array<string, mixed>  $report
      */
     private function formatTargetTablesFromReport(array $report): string
@@ -806,12 +818,6 @@ class DbToDbCommand extends Command
         $names = array_values(array_unique($names));
 
         return $names === [] ? '' : implode(', ', $names);
-    }
-
-    private function writeReportFile(string $path, array $report): void
-    {
-        File::ensureDirectoryExists(dirname($path));
-        File::put($path, json_encode($report, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE).PHP_EOL);
     }
 
     /**
