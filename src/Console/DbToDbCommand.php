@@ -3,6 +3,7 @@
 namespace MB\DbToDb\Console;
 
 use MB\DbToDb\Support\Database\AutoIncrementSynchronizer;
+use MB\DbToDb\Support\Database\DbToDbFilterEngine;
 use MB\DbToDb\Support\Database\DbToDbMappingConfigResolver;
 use MB\DbToDb\Support\Database\DbToDbRoutingExecutor;
 use MB\DbToDb\Support\ProfileLoggingChannel;
@@ -936,43 +937,7 @@ class DbToDbCommand extends Command
      */
     private function collectFilterColumnNamesFromRules(array $filters): array
     {
-        $names = [];
-        foreach ($this->normalizeFilterRulesForColumnHarvest($filters) as $filter) {
-            $column = trim((string) ($filter['column'] ?? ''));
-            if ($column !== '' && preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*$/', $column)) {
-                $names[$column] = true;
-            }
-        }
-
-        return array_keys($names);
-    }
-
-    /**
-     * @param  array<int|string, mixed>  $filters
-     * @return list<array<string, mixed>>
-     */
-    private function normalizeFilterRulesForColumnHarvest(array $filters): array
-    {
-        if ($filters === []) {
-            return [];
-        }
-
-        $first = reset($filters);
-        if (is_array($first) && array_key_exists('column', $first)) {
-            /** @var list<array<string, mixed>> $filters */
-            return $filters;
-        }
-
-        $normalized = [];
-        foreach ($filters as $column => $value) {
-            $normalized[] = [
-                'column' => (string) $column,
-                'operator' => '=',
-                'value' => $value,
-            ];
-        }
-
-        return $normalized;
+        return (new DbToDbFilterEngine)->collectColumnNames($filters);
     }
 
     /**
