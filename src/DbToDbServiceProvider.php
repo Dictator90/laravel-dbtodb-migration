@@ -8,6 +8,7 @@ use MB\DbToDb\Support\Database\DbToDbMappingValidator;
 use MB\DbToDb\Support\Database\DbToDbRoutingExecutor;
 use MB\DbToDb\Support\Database\DbToDbSourceReader;
 use MB\DbToDb\Support\Database\DbToDbTargetWriter;
+use MB\DbToDb\Support\Database\TargetTableMetadataResolver;
 
 class DbToDbServiceProvider extends ServiceProvider
 {
@@ -18,12 +19,15 @@ class DbToDbServiceProvider extends ServiceProvider
             'dbtodb_mapping'
         );
 
+        $this->app->singleton(TargetTableMetadataResolver::class);
+
         $this->app->singleton(
-            DbToDbRoutingExecutor::class, 
-            static fn (): DbToDbRoutingExecutor => new DbToDbRoutingExecutor(
+            DbToDbRoutingExecutor::class,
+            fn (): DbToDbRoutingExecutor => new DbToDbRoutingExecutor(
                 new DbToDbMappingValidator,
                 new DbToDbSourceReader,
                 new DbToDbTargetWriter,
+                $this->app->make(TargetTableMetadataResolver::class),
             )
         );
     }

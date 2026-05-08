@@ -40,7 +40,10 @@ class DbToDbRoutingExecutor
         private DbToDbMappingValidator $validator,
         private DbToDbSourceReader $sourceReader,
         private DbToDbTargetWriter $targetWriter,
-    ) {}
+        private ?TargetTableMetadataResolver $metadataResolver = null,
+    ) {
+        $this->metadataResolver ??= new TargetTableMetadataResolver;
+    }
 
     private function profileLogChannel(): string
     {
@@ -954,69 +957,7 @@ class DbToDbRoutingExecutor
      */
     private function tableColumnsByName(string $connection, string $table): array
     {
-        $driver = DB::connection($connection)->getDriverName();
-
-        if ($driver === 'sqlite') {
-            $rows = DB::connection($connection)->select(sprintf('PRAGMA table_info("%s")', str_replace('"', '""', $table)));
-            $columns = [];
-            foreach ($rows as $row) {
-                $data = (array) $row;
-                $name = (string) ($data['name'] ?? '');
-                if ($name === '') {
-                    continue;
-                }
-
-                $columns[$name] = [
-                    'nullable' => ((int) ($data['notnull'] ?? 0)) === 0,
-                    'has_default' => array_key_exists('dflt_value', $data) && $data['dflt_value'] !== null,
-                    'is_pk' => ((int) ($data['pk'] ?? 0)) === 1,
-                    'type' => strtolower((string) ($data['type'] ?? '')),
-                ];
-            }
-
-            return $columns;
-        }
-
-        if ($driver === 'pgsql') {
-            $rows = DB::connection($connection)->select(
-                <<<'SQL'
-                SELECT
-                    c.column_name,
-                    (c.is_nullable = 'YES') AS nullable,
-                    (c.column_default IS NOT NULL) AS has_default,
-                    c.data_type,
-                    EXISTS (
-                        SELECT 1
-                        FROM information_schema.table_constraints tc
-                        JOIN information_schema.key_column_usage kcu
-                            ON tc.constraint_name = kcu.constraint_name
-                            AND tc.table_schema = kcu.table_schema
-                        WHERE tc.constraint_type = 'PRIMARY KEY'
-                          AND tc.table_schema = c.table_schema
-                          AND tc.table_name = c.table_name
-                          AND kcu.column_name = c.column_name
-                    ) AS is_pk
-                FROM information_schema.columns c
-                WHERE c.table_schema = ANY (current_schemas(false))
-                  AND c.table_name = ?
-                SQL,
-                [$table],
-            );
-
-            $columns = [];
-            foreach ($rows as $row) {
-                $columns[(string) $row->column_name] = [
-                    'nullable' => (bool) $row->nullable,
-                    'has_default' => (bool) $row->has_default,
-                    'is_pk' => (bool) $row->is_pk,
-                    'type' => strtolower((string) $row->data_type),
-                ];
-            }
-
-            return $columns;
-        }
-
-        return [];
+        return $this->metadataResolver?->resolve($connection, $table) ?? [];
     }
 
     /**
