@@ -242,11 +242,67 @@ Equivalent target/PHP filters can use nested groups and row-level operators:
 
 ## Column transforms
 
-Transforms run before target type coercion. Each mapped source column can use a single rule or a list applied in order.
+Transforms run before target type coercion. You can keep the legacy addressing style where `transforms` is keyed by **source column**, or use the newer style where it is keyed by **target column** in the target definition. When both keys exist for a mapped column, the target-column definition wins.
 
-- Strings: `trim`, `null_if_empty`, `zero_date_to_null`.
-- Rule arrays: `if_eq`, `multiply`, `round_precision`, `invoke`.
-- Closures are supported in PHP config: `(mixed $value, array $sourceRow) => mixed`.
+```php
+'targets' => [
+    'users' => [
+        'columns' => [
+            'legacy_id' => 'id',
+            'email_address' => 'email',
+            'first_name' => 'name',
+            'status_code' => 'status',
+            'created' => 'created_at',
+            'country_code' => 'country_id',
+        ],
+
+        'transforms' => [
+            // New style: key by target column.
+            'email' => ['trim', 'lower', 'null_if_empty'],
+            'name' => [
+                ['rule' => 'from_columns', 'columns' => ['first_name', 'last_name'], 'separator' => ' '],
+                ['rule' => 'default', 'value' => 'Anonymous'],
+            ],
+            'status' => ['rule' => 'map', 'map' => ['A' => 'active', 'B' => 'blocked'], 'default' => 'new'],
+            'created_at' => ['rule' => 'date_format', 'from' => 'Y-m-d H:i:s', 'format' => 'Y-m-d'],
+            'country_id' => [
+                'rule' => 'lookup',
+                'target' => [
+                    'connection' => 'pgsql_app',
+                    'table' => 'countries',
+                    'key' => 'iso_code',
+                    'value' => 'id',
+                ],
+            ],
+
+            // Legacy style is still supported: key by source column.
+            'legacy_id' => ['rule' => 'cast', 'type' => 'int'],
+        ],
+    ],
+],
+```
+
+Supported string rules: `trim`, `null_if_empty`, `zero_date_to_null`, `lower`, `upper`, and `slug`.
+
+Supported array rules:
+
+- `default`: use `value` when the current value is `null`.
+- `static`: always replace the current value with `value`.
+- `map` / `enum`: map values with `map` (or `values`) and optional `default`.
+- `replace`: plain `search` / `replace` string replacement.
+- `regex_replace`: `pattern` / `replace` regular-expression replacement.
+- `substr`: `start` (or `offset`) and optional `length`.
+- `lower`, `upper`, `slug`: case and slug normalization; `slug` accepts optional `separator`.
+- `date_format`: output `format`, with optional input `from` format.
+- `cast`: `type` (or `to`) can be `int`, `float`, `string`, `bool`, `json`, or `array`.
+- `concat`: combine `items` with optional `separator`; items may be `'$value'`, `['column' => 'source_col']`, or `['value' => 'literal']`.
+- `coalesce`: return the first non-null item from `items`, with optional `default`.
+- `from_columns`: build a value from multiple source columns using `columns` plus either `separator` or a `template` such as `'{last_name}, {first_name}'`.
+- `lookup`: resolve the current value (or `from_column`) through a source/target database table using `connection`, `table`, `key`, and `value` directly on the rule or inside a nested `source` / `target` array; lookups are cached per transform engine instance.
+- Legacy rules: `if_eq`, `multiply`, and `round_precision`.
+- `invoke`: call a `[class, method]` pair.
+
+Closures and `invoke` callables receive the current value, full source row, source column, target column, and target table: `(mixed $value, array $sourceRow, ?string $sourceColumn, ?string $targetColumn, ?string $targetTable) => mixed`. Existing two-argument closures remain compatible in PHP configs.
 
 ## Developing this package
 

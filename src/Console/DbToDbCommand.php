@@ -906,6 +906,9 @@ class DbToDbCommand extends Command
                     $merged[$sourceColumn] = true;
                 }
             }
+            foreach ($this->collectTransformColumnNames((array) ($target['transforms'] ?? [])) as $column) {
+                $merged[$column] = true;
+            }
         }
 
         if (! $hasNonEmptyMap) {
@@ -938,6 +941,69 @@ class DbToDbCommand extends Command
     private function collectFilterColumnNamesFromRules(array $filters): array
     {
         return (new DbToDbFilterEngine)->collectColumnNames($filters);
+    }
+
+    /**
+     * @param  array<string, mixed>  $transforms
+     * @return list<string>
+     */
+    private function collectTransformColumnNames(array $transforms): array
+    {
+        $columns = [];
+        foreach ($transforms as $definition) {
+            foreach ($this->normalizeTransformDefinitionsForColumnCollection($definition) as $rule) {
+                if (! is_array($rule)) {
+                    continue;
+                }
+
+                foreach ((array) ($rule['columns'] ?? []) as $column) {
+                    if (is_string($column) && preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*$/', $column)) {
+                        $columns[$column] = true;
+                    }
+                }
+
+                foreach ([$rule, (array) ($rule['source'] ?? []), (array) ($rule['target'] ?? [])] as $columnSource) {
+                    foreach (['from_column', 'column'] as $key) {
+                        $column = $columnSource[$key] ?? null;
+                        if (is_string($column) && preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*$/', $column)) {
+                            $columns[$column] = true;
+                        }
+                    }
+                }
+
+                foreach (['items', 'values'] as $key) {
+                    foreach ((array) ($rule[$key] ?? []) as $item) {
+                        if (is_array($item)) {
+                            $column = $item['column'] ?? null;
+                            if (is_string($column) && preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*$/', $column)) {
+                                $columns[$column] = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        $names = array_keys($columns);
+        sort($names, SORT_STRING);
+
+        return $names;
+    }
+
+    /**
+     * @return list<mixed>
+     */
+    private function normalizeTransformDefinitionsForColumnCollection(mixed $definition): array
+    {
+        if (! is_array($definition)) {
+            return [$definition];
+        }
+
+        if (array_key_exists('rule', $definition)) {
+            return [$definition];
+        }
+
+        return array_is_list($definition) ? $definition : [$definition];
     }
 
     /**
