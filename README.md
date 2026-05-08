@@ -177,7 +177,7 @@ php artisan db:to-db --migration=catalog --step=dimensions
 | --- | --- | --- |
 | `--migration=` | legacy top-level mapping or `default` | Named migration from `dbtodb_mapping.migrations`; when omitted, top-level legacy `tables`/`columns` config is honored if present, otherwise `migrations.default` is used. |
 | `--tables=` | all source tables in selected migration/step | Comma-separated source table names. |
-| `--step=` | all steps | Run one step from the selected migration. |
+| `--step=` | all steps | Run one step from the selected migration, or from legacy top-level `runtime.steps_in_tables` when `--migration` is omitted. |
 | `--source=` | migration `source` | Override source connection. |
 | `--target=` | migration `target` | Override target connection. |
 | `--dry-run` | off | Validate and read without writing. |

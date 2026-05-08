@@ -116,13 +116,24 @@ return [
         // 'catalog' => [
         //     'source' => 'legacy_mysql',
         //     'target' => 'pgsql_app',
-        //     'tables' => [
-        //         'top_banners' => [
-        //             'catalog_banners' => [
-        //                 'link' => 'link',
+        //     'steps' => [
+        //         'dimensions' => [
+        //             'tables' => [
+        //                 'brands' => [
+        //                     'catalog_brands' => ['id' => 'id', 'name' => 'name'],
+        //                 ],
         //             ],
-        //             'catalog_banners_2' => [
-        //                 'name' => 'name',
+        //         ],
+        //         'facts' => [
+        //             'tables' => [
+        //                 'top_banners' => [
+        //                     'catalog_banners' => [
+        //                         'link' => 'link',
+        //                     ],
+        //                     'catalog_banners_2' => [
+        //                         'name' => 'name',
+        //                     ],
+        //                 ],
         //             ],
         //         ],
         //     ],
