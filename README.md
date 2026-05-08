@@ -193,9 +193,52 @@ Global defaults live in `runtime.defaults`; a migration may override them with `
 
 ## Filters
 
-Source filters support: `=`, `!=`, `>`, `>=`, `<`, `<=`, `in`, `not_in`, `like`, `not_like`, `null`, `not_null`, `between`, `not_between`, and `exists_in`.
+Source filters support: `=`, `!=`, `>`, `>=`, `<`, `<=`, `in`, `not_in`, `like`, `not_like`, `null`, `not_null`, `between`, `not_between`, `exists_in`, `where_column`, `date`, `year`, and `month`. Filters may be written as a simple associative map, a list of rule arrays, or nested `and` / `or` groups.
 
-Target filters support the same row-level operators except `exists_in`; target filters run in PHP after the source row is read.
+Target filters use the same DSL where it can be evaluated against the PHP source row. `exists_in` is SQL-only and is rejected for target filters with a clear validation error. Target filters run in PHP after the source row is read.
+
+Complex source filter example:
+
+```php
+'source' => [
+    'connection' => 'db_source',
+    'table' => 'orders',
+    'filters' => [
+        ['column' => 'total', 'operator' => '>=', 'value' => 100],
+        ['column' => 'total', 'operator' => 'where_column', 'value' => 'paid_total', 'comparison' => '<='],
+        ['column' => 'created_at', 'operator' => 'date', 'value' => '2026-05-08'],
+        ['column' => 'created_at', 'operator' => 'year', 'value' => 2026],
+        ['or' => [
+            ['column' => 'status', 'operator' => 'in', 'values' => ['paid', 'shipped']],
+            ['and' => [
+                ['column' => 'status', 'operator' => '=', 'value' => 'pending'],
+                ['column' => 'customer_email', 'operator' => 'like', 'value' => '%@example.com'],
+            ]],
+        ]],
+        ['column' => 'customer_id', 'operator' => 'exists_in', 'value' => [
+            'table' => 'customers',
+            'column' => 'id',
+            'where' => [
+                ['column' => 'active', 'operator' => '=', 'value' => 1],
+                ['column' => 'deleted_at', 'operator' => 'null'],
+            ],
+        ]],
+    ],
+],
+```
+
+Equivalent target/PHP filters can use nested groups and row-level operators:
+
+```php
+'filters' => [
+    ['or' => [
+        ['column' => 'status', 'operator' => '=', 'value' => 'paid'],
+        ['column' => 'customer_email', 'operator' => 'like', 'value' => '%@example.com'],
+    ]],
+    ['column' => 'created_at', 'operator' => 'month', 'value' => 5],
+    ['column' => 'total', 'operator' => 'where_column', 'value' => 'paid_total', 'comparison' => '<='],
+],
+```
 
 ## Column transforms
 

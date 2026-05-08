@@ -41,8 +41,10 @@ class DbToDbRoutingExecutor
         private DbToDbSourceReader $sourceReader,
         private DbToDbTargetWriter $targetWriter,
         private ?TargetTableMetadataResolver $metadataResolver = null,
+        private ?DbToDbFilterEngine $filterEngine = null,
     ) {
         $this->metadataResolver ??= new TargetTableMetadataResolver;
+        $this->filterEngine ??= new DbToDbFilterEngine;
     }
 
     private function profileLogChannel(): string
@@ -656,93 +658,7 @@ class DbToDbRoutingExecutor
      */
     private function passesFilters(array $row, array $filters): bool
     {
-        foreach ($this->normalizeFilters($filters) as $filter) {
-            if (! $this->matchesFilter($row, $filter)) {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
-    /**
-     * @param  array<int|string, mixed>  $filters
-     * @return list<array{column:string, operator:string, value:mixed}>
-     */
-    private function normalizeFilters(array $filters): array
-    {
-        if ($filters === []) {
-            return [];
-        }
-
-        $first = reset($filters);
-        if (is_array($first) && array_key_exists('column', $first)) {
-            /** @var list<array{column:string, operator:string, value:mixed}> $filters */
-            return array_map(static function (array $filter): array {
-                $operator = strtolower((string) ($filter['operator'] ?? '='));
-                $value = $filter['value'] ?? null;
-                if (in_array($operator, ['in', 'not_in'], true) && $value === null && array_key_exists('values', $filter)) {
-                    $value = $filter['values'];
-                }
-
-                return [
-                    'column' => (string) ($filter['column'] ?? ''),
-                    'operator' => $operator,
-                    'value' => $value,
-                ];
-            }, $filters);
-        }
-
-        $normalized = [];
-        foreach ($filters as $column => $value) {
-            $normalized[] = [
-                'column' => (string) $column,
-                'operator' => '=',
-                'value' => $value,
-            ];
-        }
-
-        return $normalized;
-    }
-
-    /**
-     * @param  array{column:string, operator:string, value:mixed}  $filter
-     */
-    private function matchesFilter(array $row, array $filter): bool
-    {
-        $column = $filter['column'];
-        $operator = $filter['operator'];
-        $value = $filter['value'];
-
-        $actual = array_key_exists($column, $row) ? $row[$column] : null;
-
-        return match ($operator) {
-            '=' => $actual == $value,
-            '!=' => $actual != $value,
-            '>' => $actual > $value,
-            '>=' => $actual >= $value,
-            '<' => $actual < $value,
-            '<=' => $actual <= $value,
-            'in' => is_array($value) && in_array($actual, $value, true),
-            'not_in' => is_array($value) && ! in_array($actual, $value, true),
-            'like' => is_string($actual) && $this->matchLike($actual, (string) $value),
-            'not_like' => is_string($actual) && ! $this->matchLike($actual, (string) $value),
-            'null' => $actual === null,
-            'not_null' => $actual !== null,
-            'between' => is_array($value) && count($value) === 2 && $actual >= $value[0] && $actual <= $value[1],
-            'not_between' => is_array($value) && count($value) === 2 && ($actual < $value[0] || $actual > $value[1]),
-            'exists_in' => throw new RuntimeException(
-                'Target filter operator "exists_in" is not supported. Use exists_in in source filters (config filters on source table) only.'
-            ),
-            default => throw new RuntimeException(sprintf('Unsupported target filter operator "%s".', $operator)),
-        };
-    }
-
-    private function matchLike(string $actual, string $pattern): bool
-    {
-        $regex = '/^'.str_replace(['%', '_'], ['.*', '.'], preg_quote($pattern, '/')).'$/ui';
-
-        return preg_match($regex, $actual) === 1;
+        return $this->filterEngine->passesRow($row, $filters);
     }
 
     /**
