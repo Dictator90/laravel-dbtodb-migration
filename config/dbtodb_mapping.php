@@ -9,7 +9,7 @@
  * Then define matching connections in config/database.php and run:
  *   php artisan db:to-db
  * or select a named migration:
- *   php artisan db:to-db -m=catalog
+ *   php artisan db:to-db --migration=catalog
  */
 
 return [
@@ -83,12 +83,12 @@ return [
     | Named migrations
     |--------------------------------------------------------------------------
     |
-    | The command uses migrations.default when --migration / -m is omitted.
+    | The command uses migrations.default when --migration is omitted, unless you keep the legacy top-level tables/columns format.
     | Every migration declares its source and target connections here, so simple
     | runs do not need --source or --target:
     |
     |   php artisan db:to-db
-    |   php artisan db:to-db -m=catalog
+    |   php artisan db:to-db --migration=catalog
     |
     | Short table syntax:
     |   source_table => [target_table => [source_column => target_column]]

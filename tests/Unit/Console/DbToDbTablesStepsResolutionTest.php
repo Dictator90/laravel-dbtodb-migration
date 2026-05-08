@@ -75,7 +75,7 @@ class DbToDbTablesStepsResolutionTest extends TestCase
         $this->assertSame('db_target', $pipelines[0]['targets'][0]['connection']);
     }
 
-    public function test_migration_alias_selects_named_migration(): void
+    public function test_migration_option_selects_named_migration(): void
     {
         $this->applyDbtodbMigrations([
             'default' => [
@@ -97,7 +97,7 @@ class DbToDbTablesStepsResolutionTest extends TestCase
         ]);
 
         $command = $this->app->make(DbToDbCommand::class);
-        $this->bindCommandInput($command, ['-m' => 'catalog']);
+        $this->bindCommandInput($command, ['--migration' => 'catalog']);
 
         $pipelines = $command->resolvePipelines();
         $this->assertCount(1, $pipelines);
@@ -126,6 +126,80 @@ class DbToDbTablesStepsResolutionTest extends TestCase
         $this->expectExceptionMessage('Unknown migration "missing"');
 
         $command->resolvePipelines();
+    }
+
+
+    public function test_without_migration_uses_legacy_top_level_format(): void
+    {
+        config(['dbtodb_mapping' => [
+            'strict' => true,
+            'runtime' => [
+                'defaults' => [
+                    'chunk' => 25,
+                    'transaction_mode' => 'batch',
+                ],
+                'tables' => [
+                    'legacy_users' => [
+                        'chunk' => 10,
+                        'keyset_column' => 'id',
+                    ],
+                ],
+            ],
+            'tables' => [
+                'legacy_users' => 'users',
+                'legacy_roles' => 'roles',
+            ],
+            'columns' => [
+                'legacy_users' => [
+                    'users' => [
+                        'id' => 'id',
+                        'email' => 'email',
+                    ],
+                ],
+                'legacy_roles' => [
+                    'roles' => [
+                        'id' => 'id',
+                    ],
+                ],
+            ],
+            'transforms' => [
+                'legacy_users' => [
+                    'email' => ['trim'],
+                ],
+            ],
+            'filters' => [
+                'legacy_users' => [
+                    ['column' => 'active', 'operator' => '=', 'value' => 1],
+                ],
+            ],
+            'upsert_keys' => [
+                'legacy_users' => ['id'],
+            ],
+            'migrations' => [
+                'catalog' => [
+                    'source' => 'ignored_source',
+                    'target' => 'ignored_target',
+                    'tables' => [
+                        'top_banners' => ['catalog_banners' => ['id' => 'id']],
+                    ],
+                ],
+            ],
+        ]]);
+
+        $command = $this->app->make(DbToDbCommand::class);
+        $this->bindCommandInput($command, ['--tables' => 'legacy_users']);
+
+        $pipelines = $command->resolvePipelines('legacy_mysql', 'pgsql_app');
+
+        $this->assertCount(1, $pipelines);
+        $this->assertSame('legacy:source:legacy_users', $pipelines[0]['name']);
+        $this->assertSame('legacy_users', $pipelines[0]['source']['table']);
+        $this->assertSame('legacy_mysql', $pipelines[0]['source']['connection']);
+        $this->assertSame('pgsql_app', $pipelines[0]['targets'][0]['connection']);
+        $this->assertSame(['id'], $pipelines[0]['targets'][0]['keys']);
+        $this->assertSame(['email' => ['trim']], $pipelines[0]['targets'][0]['transforms']);
+        $this->assertSame(10, $pipelines[0]['source']['chunk']);
+        $this->assertSame('id', $pipelines[0]['source']['keyset_column']);
     }
 
     public function test_single_step_selects_only_that_step_tables(): void

@@ -17,14 +17,14 @@ use Throwable;
 class DbToDbCommand extends Command
 {
     protected $signature = 'db:to-db
-        {--m|migration= : Named migration key from dbtodb_mapping.migrations (default: default)}
-        {--tables= : Comma-separated source tables from the selected migration}
+        {--migration= : Named migration key from dbtodb_mapping.migrations}
+        {--tables= : Comma-separated source tables from the selected migration or legacy config}
         {--dry-run : Validate and read data without writing}
         {--continue-on-error : Continue processing on per-pipeline failure}
         {--report-file= : Write JSON report file}
-        {--source= : Override source database connection from the selected migration}
-        {--target= : Override target database connection from the selected migration}
-        {--step= : Run only this step key from the selected migration steps (omit to run all steps in order)}
+        {--source= : Override source database connection from the selected migration or legacy config}
+        {--target= : Override target database connection from the selected migration or legacy config}
+        {--step= : Run only this step key from selected migration steps or legacy runtime.steps_in_tables}
         {--profile : Log per-pipeline and per-chunk timings to the log channel named in dbtodb_mapping.profile_logging}';
 
     protected $description = 'Universal database-to-database data routing command (1 source -> N targets).';
@@ -248,8 +248,19 @@ class DbToDbCommand extends Command
     private function resolvePipelinesFromConfig(?string $sourceOverride = null, ?string $targetOverride = null): array
     {
         $mappingConfig = (array) config('dbtodb_mapping');
-        $migrationName = $this->resolveMigrationName();
+        $migrationOption = $this->stringOptionOrNull('migration');
+
+        if ($migrationOption === null && $this->hasLegacyTablesConfig($mappingConfig)) {
+            return $this->resolveLegacyPipelinesFromConfig(
+                $mappingConfig,
+                $sourceOverride ?: 'source',
+                $targetOverride ?: 'target',
+            );
+        }
+
+        $migrationName = $migrationOption ?? 'default';
         $migrationConfig = $this->resolveMigrationConfig($mappingConfig, $migrationName);
+        $this->assertNoConflictingLegacyTableModes($mappingConfig, $migrationConfig, $migrationName, $migrationOption !== null);
         $tablesRoot = $this->resolveTablesRootForPipelines($migrationConfig, $migrationName);
 
         $source = $sourceOverride ?: trim((string) Arr::get($migrationConfig, 'source', ''));
@@ -396,9 +407,294 @@ class DbToDbCommand extends Command
 
     private function resolveMigrationName(): string
     {
-        $name = $this->stringOptionOrNull('migration') ?? 'default';
+        $name = $this->stringOptionOrNull('migration');
+        if ($name !== null) {
+            return $name;
+        }
 
-        return $name === '' ? 'default' : $name;
+        return $this->hasLegacyTablesConfig((array) config('dbtodb_mapping')) ? 'legacy' : 'default';
+    }
+
+    /**
+     * @param  array<string, mixed>  $mappingConfig
+     */
+    private function hasLegacyTablesConfig(array $mappingConfig): bool
+    {
+        return array_key_exists('tables', $mappingConfig);
+    }
+
+    /**
+     * @param  array<string, mixed>  $mappingConfig
+     * @param  array<string, mixed>  $migrationConfig
+     */
+    private function assertNoConflictingLegacyTableModes(
+        array $mappingConfig,
+        array $migrationConfig,
+        string $migrationName,
+        bool $migrationWasExplicitlySelected,
+    ): void {
+        if (! $migrationWasExplicitlySelected) {
+            return;
+        }
+
+        $legacyStepsInTables = filter_var(
+            Arr::get($mappingConfig, 'runtime.steps_in_tables', false),
+            FILTER_VALIDATE_BOOLEAN,
+        );
+        if (! $legacyStepsInTables || ! array_key_exists('tables', $migrationConfig)) {
+            return;
+        }
+
+        $step = trim((string) ($this->option('step') ?? ''));
+        if ($step === '') {
+            return;
+        }
+
+        throw new RuntimeException(sprintf(
+            'Cannot combine --migration=%s with legacy dbtodb_mapping.runtime.steps_in_tables and --step. Define ordered steps under dbtodb_mapping.migrations.%s.steps, or remove --step. Use --tables as an additional filter inside the selected migration.',
+            $migrationName,
+            $migrationName,
+        ));
+    }
+
+    /**
+     * Build pipelines from the pre-migrations top-level config shape:
+     * tables, columns, transforms, filters, upsert_keys, and runtime.tables.
+     *
+     * @param  array<string, mixed>  $mappingConfig
+     * @return list<array<string, mixed>>
+     */
+    private function resolveLegacyPipelinesFromConfig(array $mappingConfig, string $source, string $target): array
+    {
+        $tablesRoot = $this->resolveLegacyTablesRootForPipelines($mappingConfig);
+        $mappingConfig['tables'] = $tablesRoot;
+
+        $allowedSourceTables = array_keys($tablesRoot);
+        $tables = $this->resolveTables($allowedSourceTables, (string) ($this->option('tables') ?? ''));
+
+        $strict = (bool) Arr::get($mappingConfig, 'strict', true);
+        $defaultChunk = (int) Arr::get($mappingConfig, 'runtime.defaults.chunk', 1000);
+        if ($defaultChunk < 1) {
+            throw new RuntimeException('Invalid dbtodb_mapping.runtime.defaults.chunk, expected integer >= 1.');
+        }
+
+        $defaultTransactionMode = (string) Arr::get($mappingConfig, 'runtime.defaults.transaction_mode', 'batch');
+        if (! in_array($defaultTransactionMode, ['atomic', 'batch'], true)) {
+            throw new RuntimeException('Invalid dbtodb_mapping.runtime.defaults.transaction_mode, expected "atomic" or "batch".');
+        }
+
+        $pipelines = [];
+        foreach ($tables as $table) {
+            $targetTables = $this->normalizeLegacyTargetTables($mappingConfig, $table);
+            $filterResolution = $this->resolveLegacyFiltersForTable($mappingConfig, $table, $targetTables);
+
+            $targets = [];
+            foreach ($targetTables as $targetTable) {
+                $map = Arr::get($mappingConfig, sprintf('columns.%s.%s', $table, $targetTable), []);
+                if (! is_array($map)) {
+                    throw new RuntimeException(sprintf(
+                        'Invalid columns mapping for "%s" -> "%s". Expected columns.%s.%s array.',
+                        $table,
+                        $targetTable,
+                        $table,
+                        $targetTable,
+                    ));
+                }
+                if (count($targetTables) > 1 && $map === []) {
+                    throw new RuntimeException(sprintf(
+                        'Missing columns mapping for "%s" -> "%s". Expected columns.%s.%s array for multi-target routing.',
+                        $table,
+                        $targetTable,
+                        $table,
+                        $targetTable,
+                    ));
+                }
+
+                $transforms = $this->resolveLegacyTransformsForTarget($mappingConfig, $table, $targetTable, $targetTables);
+                if (! is_array($transforms)) {
+                    throw new RuntimeException(sprintf(
+                        'Invalid transforms mapping for "%s" -> "%s". Expected transforms.%s.%s array.',
+                        $table,
+                        $targetTable,
+                        $table,
+                        $targetTable,
+                    ));
+                }
+
+                $targetDef = [
+                    'connection' => $target,
+                    'table' => $targetTable,
+                    'operation' => 'upsert',
+                    'map' => $map,
+                    'transforms' => $transforms,
+                    'filters' => $filterResolution['targets'][$targetTable] ?? [],
+                ];
+
+                $upsertKeys = $this->resolveLegacyUpsertKeysForTarget($mappingConfig, $table, $targetTable);
+                if ($upsertKeys !== []) {
+                    $targetDef['keys'] = $upsertKeys;
+                }
+
+                $targets[] = $targetDef;
+            }
+
+            $tableChunk = (int) Arr::get($mappingConfig, sprintf('runtime.tables.%s.chunk', $table), $defaultChunk);
+            if ($tableChunk < 1) {
+                throw new RuntimeException(sprintf(
+                    'Invalid dbtodb_mapping.runtime.tables.%s.chunk, expected integer >= 1.',
+                    $table,
+                ));
+            }
+
+            $tableTransactionMode = (string) Arr::get(
+                $mappingConfig,
+                sprintf('runtime.tables.%s.transaction_mode', $table),
+                $defaultTransactionMode,
+            );
+            if (! in_array($tableTransactionMode, ['atomic', 'batch'], true)) {
+                throw new RuntimeException(sprintf(
+                    'Invalid dbtodb_mapping.runtime.tables.%s.transaction_mode, expected "atomic" or "batch".',
+                    $table,
+                ));
+            }
+
+            $keysetColumn = trim((string) Arr::get($mappingConfig, sprintf('runtime.tables.%s.keyset_column', $table), ''));
+            if ($keysetColumn !== '' && ! preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*$/', $keysetColumn)) {
+                throw new RuntimeException(sprintf(
+                    'Invalid dbtodb_mapping.runtime.tables.%s.keyset_column, expected identifier pattern.',
+                    $table,
+                ));
+            }
+
+            $sourceSelect = $this->resolveSourceSelectFromMapping(
+                $targets,
+                $filterResolution['source'] ?? [],
+                $keysetColumn,
+            );
+
+            $sourceDef = [
+                'connection' => $source,
+                'table' => $table,
+                'chunk' => $tableChunk,
+                'filters' => $filterResolution['source'],
+            ];
+            if ($keysetColumn !== '') {
+                $sourceDef['keyset_column'] = $keysetColumn;
+            }
+            if ($sourceSelect !== null) {
+                $sourceDef['select'] = $sourceSelect;
+            }
+
+            $pipelines[] = [
+                'name' => 'legacy:source:'.$table,
+                'strict' => $strict,
+                'transaction_mode' => $tableTransactionMode,
+                'source' => $sourceDef,
+                'targets' => $targets,
+            ];
+        }
+
+        return $pipelines;
+    }
+
+    /**
+     * @param  array<string, mixed>  $mappingConfig
+     * @return array<string, mixed>
+     */
+    private function resolveLegacyTablesRootForPipelines(array $mappingConfig): array
+    {
+        $step = trim((string) ($this->option('step') ?? ''));
+        $stepsInTables = filter_var(
+            Arr::get($mappingConfig, 'runtime.steps_in_tables', false),
+            FILTER_VALIDATE_BOOLEAN,
+        );
+
+        $raw = $mappingConfig['tables'] ?? [];
+        if (! is_array($raw)) {
+            throw new RuntimeException('Invalid dbtodb_mapping.tables: expected array.');
+        }
+
+        if (! $stepsInTables) {
+            if ($step !== '') {
+                throw new RuntimeException(
+                    'The --step option is only valid when dbtodb_mapping.runtime.steps_in_tables is true or the selected migration defines steps.'
+                );
+            }
+
+            return $this->validateSourceTableMap($raw, 'tables');
+        }
+
+        if ($raw === []) {
+            throw new RuntimeException(
+                'Invalid dbtodb_mapping.tables: expected non-empty array when runtime.steps_in_tables is true.'
+            );
+        }
+
+        if (array_is_list($raw)) {
+            throw new RuntimeException(
+                'When dbtodb_mapping.runtime.steps_in_tables is true, tables must be a map of step keys (e.g. first, second), not a list.'
+            );
+        }
+
+        if ($step !== '') {
+            if (! array_key_exists($step, $raw)) {
+                throw new RuntimeException(sprintf(
+                    'Unknown step "%s". Available steps: %s.',
+                    $step,
+                    implode(', ', array_keys($raw)),
+                ));
+            }
+
+            $inner = $raw[$step];
+            if (! is_array($inner) || $inner === []) {
+                throw new RuntimeException(sprintf(
+                    'Invalid dbtodb_mapping.tables step "%s": expected non-empty array of source => target mappings.',
+                    $step,
+                ));
+            }
+            if (array_is_list($inner)) {
+                throw new RuntimeException(sprintf(
+                    'Invalid dbtodb_mapping.tables step "%s": inner map must use source table names as keys, not a list.',
+                    $step,
+                ));
+            }
+
+            return $this->validateSourceTableMap($inner, sprintf('tables.%s', $step));
+        }
+
+        $merged = [];
+        foreach ($raw as $stepName => $inner) {
+            if (! is_string($stepName) || trim($stepName) === '') {
+                throw new RuntimeException(
+                    'When dbtodb_mapping.runtime.steps_in_tables is true, every step key must be a non-empty string.'
+                );
+            }
+            if (! is_array($inner) || $inner === []) {
+                throw new RuntimeException(sprintf(
+                    'Invalid dbtodb_mapping.tables step "%s": expected non-empty array of source => target mappings.',
+                    $stepName,
+                ));
+            }
+            if (array_is_list($inner)) {
+                throw new RuntimeException(sprintf(
+                    'Invalid dbtodb_mapping.tables step "%s": inner map must use source table names as keys, not a list.',
+                    $stepName,
+                ));
+            }
+            $inner = $this->validateSourceTableMap($inner, sprintf('tables.%s', $stepName));
+            foreach ($inner as $sourceTable => $targets) {
+                if (array_key_exists($sourceTable, $merged)) {
+                    throw new RuntimeException(sprintf(
+                        'Duplicate source table "%s" under step "%s" and an earlier step. Use --step to run one step, or remove the duplicate.',
+                        $sourceTable,
+                        $stepName,
+                    ));
+                }
+                $merged[$sourceTable] = $targets;
+            }
+        }
+
+        return $merged;
     }
 
     /**
@@ -675,6 +971,157 @@ class DbToDbCommand extends Command
         $target['columns'] = $definition['columns'] ?? [];
 
         return $target;
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function normalizeLegacyTargetTables(array $mappingConfig, string $table): array
+    {
+        $raw = Arr::get($mappingConfig, 'tables.'.$table);
+
+        if (is_string($raw) && trim($raw) !== '') {
+            return [trim($raw)];
+        }
+
+        if (! is_array($raw) || $raw === []) {
+            throw new RuntimeException(sprintf(
+                'Invalid dbtodb_mapping.tables for "%s": expected non-empty string or array of target tables.',
+                $table,
+            ));
+        }
+
+        $normalized = [];
+        foreach ($raw as $targetTable) {
+            if (! is_string($targetTable) || trim($targetTable) === '') {
+                throw new RuntimeException(sprintf(
+                    'Invalid dbtodb_mapping.tables for "%s": every target table must be non-empty string.',
+                    $table,
+                ));
+            }
+            $normalized[] = trim($targetTable);
+        }
+
+        return $normalized;
+    }
+
+    /**
+     * @param  list<string>  $targetTables
+     * @return array{source: array<int|string, mixed>, targets: array<string, array<int|string, mixed>>}
+     */
+    private function resolveLegacyFiltersForTable(array $mappingConfig, string $table, array $targetTables): array
+    {
+        $raw = Arr::get($mappingConfig, 'filters.'.$table, []);
+        if (! is_array($raw)) {
+            throw new RuntimeException(sprintf('Invalid filters for "%s": expected array.', $table));
+        }
+
+        $targetTableSet = array_fill_keys($targetTables, true);
+        $usesPerTargetShape = array_key_exists('default', $raw);
+        if (! $usesPerTargetShape) {
+            foreach (array_keys($raw) as $key) {
+                if (is_string($key) && array_key_exists($key, $targetTableSet)) {
+                    $usesPerTargetShape = true;
+                    break;
+                }
+            }
+        }
+
+        if (! $usesPerTargetShape) {
+            return [
+                'source' => $raw,
+                'targets' => [],
+            ];
+        }
+
+        $defaultRules = $raw['default'] ?? [];
+        if (! is_array($defaultRules)) {
+            throw new RuntimeException(sprintf(
+                'Invalid filters.%s.default: expected rules array.',
+                $table,
+            ));
+        }
+
+        $targetFilters = [];
+        foreach ($targetTables as $targetTable) {
+            $rules = $raw[$targetTable] ?? $defaultRules;
+            if (! is_array($rules)) {
+                throw new RuntimeException(sprintf(
+                    'Invalid filters.%s.%s: expected rules array.',
+                    $table,
+                    $targetTable,
+                ));
+            }
+            $targetFilters[$targetTable] = $rules;
+        }
+
+        return [
+            'source' => [],
+            'targets' => $targetFilters,
+        ];
+    }
+
+    /**
+     * @param  list<string>  $knownTargetTables
+     * @return array<string, mixed>
+     */
+    private function resolveLegacyTransformsForTarget(
+        array $mappingConfig,
+        string $sourceTable,
+        string $targetTable,
+        array $knownTargetTables,
+    ): array {
+        $tableTransforms = Arr::get($mappingConfig, sprintf('transforms.%s', $sourceTable), []);
+        if (! is_array($tableTransforms)) {
+            throw new RuntimeException(sprintf(
+                'Invalid transforms for "%s": expected array.',
+                $sourceTable,
+            ));
+        }
+
+        $targetTransforms = Arr::get($tableTransforms, $targetTable, []);
+        if ($targetTransforms !== [] && ! is_array($targetTransforms)) {
+            throw new RuntimeException(sprintf(
+                'Invalid transforms mapping for "%s" -> "%s". Expected transforms.%s.%s array.',
+                $sourceTable,
+                $targetTable,
+                $sourceTable,
+                $targetTable,
+            ));
+        }
+
+        $knownTargets = array_fill_keys($knownTargetTables, true);
+        $tableLevelTransforms = [];
+        foreach ($tableTransforms as $key => $value) {
+            if (is_string($key) && array_key_exists($key, $knownTargets)) {
+                continue;
+            }
+            $tableLevelTransforms[$key] = $value;
+        }
+
+        return array_merge($tableLevelTransforms, is_array($targetTransforms) ? $targetTransforms : []);
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function resolveLegacyUpsertKeysForTarget(array $mappingConfig, string $sourceTable, string $targetTable): array
+    {
+        $node = Arr::get($mappingConfig, sprintf('upsert_keys.%s', $sourceTable));
+        if (! is_array($node) || $node === []) {
+            return [];
+        }
+
+        if (array_is_list($node)) {
+            return $this->normalizeStringList($node);
+        }
+
+        $specific = $node[$targetTable] ?? null;
+        if (! is_array($specific)) {
+            return [];
+        }
+
+        return $this->normalizeStringList($specific);
     }
 
     /**
