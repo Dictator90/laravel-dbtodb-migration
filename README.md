@@ -18,7 +18,7 @@ Define the database connections referenced by your migrations in `config/databas
 
 ## Quick start
 
-The command uses `migrations.default` when `--migration` / `-m` is omitted, so simple runs do not need `--source` or `--target`.
+The command uses the legacy top-level mapping when `tables` exists at the config root; otherwise it uses `migrations.default` when `--migration` is omitted. Simple named-migration runs do not need `--source` or `--target` when the migration defines them.
 
 ```php
 // config/dbtodb_mapping.php
@@ -50,7 +50,7 @@ php artisan db:to-db
 
 ## Named migrations
 
-Add as many migrations as you need under `migrations`. Select one with `--migration=name` or the short alias `-m=name`.
+Add as many migrations as you need under the top-level `migrations` node. Select one with `--migration=name`.
 
 ```php
 'migrations' => [
@@ -82,7 +82,8 @@ Add as many migrations as you need under `migrations`. Select one with `--migrat
 ```
 
 ```bash
-php artisan db:to-db -m=catalog
+php artisan db:to-db --migration=catalog
+php artisan db:to-db --migration=catalog --source=legacy_mysql --target=pgsql_app
 php artisan db:to-db --migration=catalog --dry-run
 ```
 
@@ -155,14 +156,14 @@ A migration can contain ordered `steps`. Omit `--step` to run all steps in order
 ```
 
 ```bash
-php artisan db:to-db -m=catalog --step=dimensions
+php artisan db:to-db --migration=catalog --step=dimensions
 ```
 
 ## Command options
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `--migration=` / `-m=` | `default` | Named migration from `dbtodb_mapping.migrations`. |
+| `--migration=` | legacy top-level mapping or `default` | Named migration from `dbtodb_mapping.migrations`; when omitted, top-level legacy `tables`/`columns` config is honored if present, otherwise `migrations.default` is used. |
 | `--tables=` | all source tables in selected migration/step | Comma-separated source table names. |
 | `--step=` | all steps | Run one step from the selected migration. |
 | `--source=` | migration `source` | Override source connection. |
