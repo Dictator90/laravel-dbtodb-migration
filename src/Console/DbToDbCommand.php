@@ -3,6 +3,7 @@
 namespace MB\DbToDb\Console;
 
 use MB\DbToDb\Support\Database\AutoIncrementSynchronizer;
+use MB\DbToDb\Support\Database\DbToDbMappingConfigResolver;
 use MB\DbToDb\Support\Database\DbToDbRoutingExecutor;
 use MB\DbToDb\Support\ProfileLoggingChannel;
 use Illuminate\Console\Command;
@@ -32,6 +33,7 @@ class DbToDbCommand extends Command
     public function __construct(
         private DbToDbRoutingExecutor $executor,
         private AutoIncrementSynchronizer $autoIncrementSynchronizer,
+        private DbToDbMappingConfigResolver $mappingConfigResolver,
     ) {
         parent::__construct();
     }
@@ -300,7 +302,7 @@ class DbToDbCommand extends Command
 
         $pipelines = [];
         foreach ($tables as $table) {
-            $tableDefinition = $this->normalizeMigrationTableDefinition($tablesRoot[$table] ?? null, $table);
+            $tableDefinition = $this->mappingConfigResolver->normalizeMigrationTableDefinition($tablesRoot[$table] ?? null, $table);
             $targetTables = array_keys($tableDefinition['targets']);
             $sourceFilters = (array) ($tableDefinition['source']['filters'] ?? []);
 
@@ -341,7 +343,7 @@ class DbToDbCommand extends Command
                     'filters' => $targetConfig['filters'] ?? [],
                 ];
 
-                $upsertKeys = $this->normalizeStringList($targetConfig['upsert_keys'] ?? []);
+                $upsertKeys = $this->mappingConfigResolver->normalizeStringList($targetConfig['upsert_keys'] ?? []);
                 if ($upsertKeys !== []) {
                     $targetDef['keys'] = $upsertKeys;
                 }
@@ -485,12 +487,20 @@ class DbToDbCommand extends Command
 
         $pipelines = [];
         foreach ($tables as $table) {
-            $targetTables = $this->normalizeLegacyTargetTables($mappingConfig, $table);
-            $filterResolution = $this->resolveLegacyFiltersForTable($mappingConfig, $table, $targetTables);
+            $tableDefinition = $this->mappingConfigResolver->normalizeLegacyTableDefinition($mappingConfig, $table);
+            $targetTables = array_keys($tableDefinition['targets']);
+            $filterResolution = [
+                'source' => $tableDefinition['source']['filters'],
+                'targets' => array_map(
+                    static fn (array $target): array => (array) ($target['filters'] ?? []),
+                    $tableDefinition['targets'],
+                ),
+            ];
 
             $targets = [];
             foreach ($targetTables as $targetTable) {
-                $map = Arr::get($mappingConfig, sprintf('columns.%s.%s', $table, $targetTable), []);
+                $targetConfig = $tableDefinition['targets'][$targetTable];
+                $map = $targetConfig['columns'] ?? [];
                 if (! is_array($map)) {
                     throw new RuntimeException(sprintf(
                         'Invalid columns mapping for "%s" -> "%s". Expected columns.%s.%s array.',
@@ -510,7 +520,7 @@ class DbToDbCommand extends Command
                     ));
                 }
 
-                $transforms = $this->resolveLegacyTransformsForTarget($mappingConfig, $table, $targetTable, $targetTables);
+                $transforms = $targetConfig['transforms'] ?? [];
                 if (! is_array($transforms)) {
                     throw new RuntimeException(sprintf(
                         'Invalid transforms mapping for "%s" -> "%s". Expected transforms.%s.%s array.',
@@ -530,7 +540,7 @@ class DbToDbCommand extends Command
                     'filters' => $filterResolution['targets'][$targetTable] ?? [],
                 ];
 
-                $upsertKeys = $this->resolveLegacyUpsertKeysForTarget($mappingConfig, $table, $targetTable);
+                $upsertKeys = $this->mappingConfigResolver->normalizeStringList($targetConfig['upsert_keys'] ?? []);
                 if ($upsertKeys !== []) {
                     $targetDef['keys'] = $upsertKeys;
                 }
@@ -834,309 +844,6 @@ class DbToDbCommand extends Command
         }
 
         return $tables;
-    }
-
-    /**
-     * @return array{source: array<string, mixed>, targets: array<string, array<string, mixed>>}
-     */
-    private function normalizeMigrationTableDefinition(mixed $definition, string $sourceTable): array
-    {
-        if (is_string($definition) && trim($definition) !== '') {
-            return [
-                'source' => ['filters' => [], 'runtime' => []],
-                'targets' => [trim($definition) => ['columns' => []]],
-            ];
-        }
-
-        if (! is_array($definition) || $definition === []) {
-            throw new RuntimeException(sprintf(
-                'Invalid table definition for source "%s": expected target map or table definition array.',
-                $sourceTable,
-            ));
-        }
-
-        $source = [
-            'filters' => [],
-            'runtime' => [],
-        ];
-
-        if (isset($definition['source'])) {
-            if (! is_array($definition['source'])) {
-                throw new RuntimeException(sprintf('Invalid source definition for table "%s": expected array.', $sourceTable));
-            }
-            $source['filters'] = $definition['source']['filters'] ?? [];
-            $source['runtime'] = $this->normalizeRuntimeDefinition($definition['source']);
-        }
-
-        if (array_key_exists('filters', $definition)) {
-            $source['filters'] = $definition['filters'];
-        }
-        if (array_key_exists('runtime', $definition) && is_array($definition['runtime'])) {
-            $source['runtime'] = array_replace($source['runtime'], $definition['runtime']);
-        }
-        foreach (['chunk', 'transaction_mode', 'keyset_column'] as $runtimeKey) {
-            if (array_key_exists($runtimeKey, $definition)) {
-                $source['runtime'][$runtimeKey] = $definition[$runtimeKey];
-            }
-        }
-
-        $targetsNode = $definition['targets'] ?? null;
-        if ($targetsNode === null) {
-            $targetsNode = array_diff_key($definition, array_flip([
-                'source',
-                'filters',
-                'runtime',
-                'chunk',
-                'transaction_mode',
-                'keyset_column',
-            ]));
-        }
-
-        if (is_array($targetsNode) && array_is_list($targetsNode)) {
-            $targets = [];
-            foreach ($targetsNode as $targetName) {
-                if (! is_string($targetName) || trim($targetName) === '') {
-                    throw new RuntimeException(sprintf('Invalid target list for source "%s": target names must be non-empty strings.', $sourceTable));
-                }
-                $targets[trim($targetName)] = ['columns' => []];
-            }
-
-            return ['source' => $source, 'targets' => $targets];
-        }
-
-        if (! is_array($targetsNode) || $targetsNode === []) {
-            throw new RuntimeException(sprintf('Invalid targets for source "%s": expected non-empty target map.', $sourceTable));
-        }
-
-        $targets = [];
-        foreach ($targetsNode as $targetTable => $targetDefinition) {
-            if (! is_string($targetTable) || trim($targetTable) === '') {
-                throw new RuntimeException(sprintf('Invalid target key for source "%s": expected non-empty string.', $sourceTable));
-            }
-            $targets[trim($targetTable)] = $this->normalizeTargetDefinition($targetDefinition, $sourceTable, trim($targetTable));
-        }
-
-        return ['source' => $source, 'targets' => $targets];
-    }
-
-    /**
-     * @return array<string, mixed>
-     */
-    private function normalizeRuntimeDefinition(array $definition): array
-    {
-        $runtime = [];
-        if (isset($definition['runtime']) && is_array($definition['runtime'])) {
-            $runtime = $definition['runtime'];
-        }
-        foreach (['chunk', 'transaction_mode', 'keyset_column'] as $runtimeKey) {
-            if (array_key_exists($runtimeKey, $definition)) {
-                $runtime[$runtimeKey] = $definition[$runtimeKey];
-            }
-        }
-
-        return $runtime;
-    }
-
-    /**
-     * @return array<string, mixed>
-     */
-    private function normalizeTargetDefinition(mixed $definition, string $sourceTable, string $targetTable): array
-    {
-        if ($definition === null) {
-            return ['columns' => []];
-        }
-
-        if (! is_array($definition)) {
-            throw new RuntimeException(sprintf(
-                'Invalid target definition for "%s" -> "%s": expected array.',
-                $sourceTable,
-                $targetTable,
-            ));
-        }
-
-        $reserved = ['columns', 'transforms', 'filters', 'upsert_keys', 'operation'];
-        $hasFullShape = false;
-        foreach ($reserved as $key) {
-            if (array_key_exists($key, $definition)) {
-                $hasFullShape = true;
-                break;
-            }
-        }
-
-        if (! $hasFullShape) {
-            return ['columns' => $definition];
-        }
-
-        $target = $definition;
-        $target['columns'] = $definition['columns'] ?? [];
-
-        return $target;
-    }
-
-    /**
-     * @return list<string>
-     */
-    private function normalizeLegacyTargetTables(array $mappingConfig, string $table): array
-    {
-        $raw = Arr::get($mappingConfig, 'tables.'.$table);
-
-        if (is_string($raw) && trim($raw) !== '') {
-            return [trim($raw)];
-        }
-
-        if (! is_array($raw) || $raw === []) {
-            throw new RuntimeException(sprintf(
-                'Invalid dbtodb_mapping.tables for "%s": expected non-empty string or array of target tables.',
-                $table,
-            ));
-        }
-
-        $normalized = [];
-        foreach ($raw as $targetTable) {
-            if (! is_string($targetTable) || trim($targetTable) === '') {
-                throw new RuntimeException(sprintf(
-                    'Invalid dbtodb_mapping.tables for "%s": every target table must be non-empty string.',
-                    $table,
-                ));
-            }
-            $normalized[] = trim($targetTable);
-        }
-
-        return $normalized;
-    }
-
-    /**
-     * @param  list<string>  $targetTables
-     * @return array{source: array<int|string, mixed>, targets: array<string, array<int|string, mixed>>}
-     */
-    private function resolveLegacyFiltersForTable(array $mappingConfig, string $table, array $targetTables): array
-    {
-        $raw = Arr::get($mappingConfig, 'filters.'.$table, []);
-        if (! is_array($raw)) {
-            throw new RuntimeException(sprintf('Invalid filters for "%s": expected array.', $table));
-        }
-
-        $targetTableSet = array_fill_keys($targetTables, true);
-        $usesPerTargetShape = array_key_exists('default', $raw);
-        if (! $usesPerTargetShape) {
-            foreach (array_keys($raw) as $key) {
-                if (is_string($key) && array_key_exists($key, $targetTableSet)) {
-                    $usesPerTargetShape = true;
-                    break;
-                }
-            }
-        }
-
-        if (! $usesPerTargetShape) {
-            return [
-                'source' => $raw,
-                'targets' => [],
-            ];
-        }
-
-        $defaultRules = $raw['default'] ?? [];
-        if (! is_array($defaultRules)) {
-            throw new RuntimeException(sprintf(
-                'Invalid filters.%s.default: expected rules array.',
-                $table,
-            ));
-        }
-
-        $targetFilters = [];
-        foreach ($targetTables as $targetTable) {
-            $rules = $raw[$targetTable] ?? $defaultRules;
-            if (! is_array($rules)) {
-                throw new RuntimeException(sprintf(
-                    'Invalid filters.%s.%s: expected rules array.',
-                    $table,
-                    $targetTable,
-                ));
-            }
-            $targetFilters[$targetTable] = $rules;
-        }
-
-        return [
-            'source' => [],
-            'targets' => $targetFilters,
-        ];
-    }
-
-    /**
-     * @param  list<string>  $knownTargetTables
-     * @return array<string, mixed>
-     */
-    private function resolveLegacyTransformsForTarget(
-        array $mappingConfig,
-        string $sourceTable,
-        string $targetTable,
-        array $knownTargetTables,
-    ): array {
-        $tableTransforms = Arr::get($mappingConfig, sprintf('transforms.%s', $sourceTable), []);
-        if (! is_array($tableTransforms)) {
-            throw new RuntimeException(sprintf(
-                'Invalid transforms for "%s": expected array.',
-                $sourceTable,
-            ));
-        }
-
-        $targetTransforms = Arr::get($tableTransforms, $targetTable, []);
-        if ($targetTransforms !== [] && ! is_array($targetTransforms)) {
-            throw new RuntimeException(sprintf(
-                'Invalid transforms mapping for "%s" -> "%s". Expected transforms.%s.%s array.',
-                $sourceTable,
-                $targetTable,
-                $sourceTable,
-                $targetTable,
-            ));
-        }
-
-        $knownTargets = array_fill_keys($knownTargetTables, true);
-        $tableLevelTransforms = [];
-        foreach ($tableTransforms as $key => $value) {
-            if (is_string($key) && array_key_exists($key, $knownTargets)) {
-                continue;
-            }
-            $tableLevelTransforms[$key] = $value;
-        }
-
-        return array_merge($tableLevelTransforms, is_array($targetTransforms) ? $targetTransforms : []);
-    }
-
-    /**
-     * @return list<string>
-     */
-    private function resolveLegacyUpsertKeysForTarget(array $mappingConfig, string $sourceTable, string $targetTable): array
-    {
-        $node = Arr::get($mappingConfig, sprintf('upsert_keys.%s', $sourceTable));
-        if (! is_array($node) || $node === []) {
-            return [];
-        }
-
-        if (array_is_list($node)) {
-            return $this->normalizeStringList($node);
-        }
-
-        $specific = $node[$targetTable] ?? null;
-        if (! is_array($specific)) {
-            return [];
-        }
-
-        return $this->normalizeStringList($specific);
-    }
-
-    /**
-     * @return list<string>
-     */
-    private function normalizeStringList(mixed $value): array
-    {
-        if (! is_array($value)) {
-            return [];
-        }
-
-        return array_values(array_filter(
-            array_map(static fn (mixed $item): string => is_string($item) ? trim($item) : '', $value),
-            static fn (string $item): bool => $item !== '',
-        ));
     }
 
     /**
