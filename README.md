@@ -16,6 +16,18 @@ php artisan vendor:publish --tag=dbtodb-migration-config
 
 Define the database connections referenced by your migrations in `config/database.php`.
 
+## Supported target drivers
+
+Target-table metadata resolution, required-column validation, and automatic primary-key detection are supported for these Laravel target connection drivers:
+
+- `sqlite`
+- `pgsql`
+- `mysql`
+- `mariadb`
+- `sqlsrv`
+
+Table prefixes configured on the target connection are honored when reading target metadata.
+
 ## Quick start
 
 The command uses the legacy top-level mapping when `tables` exists at the config root; otherwise it uses `migrations.default` when `--migration` is omitted. Simple named-migration runs do not need `--source` or `--target` when the migration defines them.
