@@ -248,4 +248,174 @@ class DbToDbTablesStepsResolutionTest extends TestCase
 
         $this->resolvePipelines();
     }
+
+    public function test_named_migration_steps_support_tables_wrapped_under_step_names(): void
+    {
+        $this->applyDbtodbMigrations([
+            'catalog' => [
+                'source' => 'legacy_mysql',
+                'target' => 'pgsql_app',
+                'steps' => [
+                    'dimensions' => [
+                        'tables' => [
+                            'legacy_brands' => [
+                                'brands' => [
+                                    'id' => 'id',
+                                    'name' => 'name',
+                                ],
+                            ],
+                        ],
+                    ],
+                    'facts' => [
+                        'tables' => [
+                            'legacy_products' => [
+                                'products' => [
+                                    'id' => 'id',
+                                    'brand_id' => 'brand_id',
+                                ],
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+        ]);
+
+        $allPipelines = $this->resolvePipelines(['--migration' => 'catalog']);
+        $this->assertCount(2, $allPipelines);
+        $this->assertSame(['legacy_brands', 'legacy_products'], array_column(array_column($allPipelines, 'source'), 'table'));
+
+        $dimensionPipelines = $this->resolvePipelines([
+            '--migration' => 'catalog',
+            '--step' => 'dimensions',
+        ]);
+
+        $this->assertCount(1, $dimensionPipelines);
+        $this->assertSame('catalog:source:legacy_brands', $dimensionPipelines[0]['name']);
+        $this->assertSame('legacy_mysql', $dimensionPipelines[0]['source']['connection']);
+        $this->assertSame('pgsql_app', $dimensionPipelines[0]['targets'][0]['connection']);
+        $this->assertSame('brands', $dimensionPipelines[0]['targets'][0]['table']);
+        $this->assertSame(['id' => 'id', 'name' => 'name'], $dimensionPipelines[0]['targets'][0]['map']);
+    }
+
+    public function test_same_source_table_is_allowed_in_different_migration_names(): void
+    {
+        $this->applyDbtodbMigrations([
+            'catalog' => [
+                'source' => 'legacy_mysql',
+                'target' => 'pgsql_app',
+                'tables' => [
+                    'shared_source' => [
+                        'catalog_items' => [
+                            'columns' => [
+                                'id' => 'catalog_id',
+                                'title' => 'name',
+                            ],
+                            'filters' => [
+                                ['column' => 'type', 'operator' => '=', 'value' => 'catalog'],
+                            ],
+                            'transforms' => [
+                                'name' => ['trim'],
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+            'archive' => [
+                'source' => 'legacy_mysql',
+                'target' => 'warehouse',
+                'tables' => [
+                    'shared_source' => [
+                        'archive_items' => [
+                            'columns' => [
+                                'id' => 'archive_id',
+                                'deleted_at' => 'archived_at',
+                            ],
+                            'filters' => [
+                                ['column' => 'deleted_at', 'operator' => '!=', 'value' => null],
+                            ],
+                            'transforms' => [
+                                'archived_at' => ['date:Y-m-d H:i:s'],
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+        ]);
+
+        $catalogPipelines = $this->resolvePipelines(['--migration' => 'catalog']);
+        $archivePipelines = $this->resolvePipelines(['--migration' => 'archive']);
+
+        $this->assertCount(1, $catalogPipelines);
+        $this->assertCount(1, $archivePipelines);
+        $this->assertSame('shared_source', $catalogPipelines[0]['source']['table']);
+        $this->assertSame('shared_source', $archivePipelines[0]['source']['table']);
+        $this->assertSame('catalog_items', $catalogPipelines[0]['targets'][0]['table']);
+        $this->assertSame('archive_items', $archivePipelines[0]['targets'][0]['table']);
+        $this->assertSame(['id' => 'catalog_id', 'title' => 'name'], $catalogPipelines[0]['targets'][0]['map']);
+        $this->assertSame(['id' => 'archive_id', 'deleted_at' => 'archived_at'], $archivePipelines[0]['targets'][0]['map']);
+        $this->assertSame([['column' => 'type', 'operator' => '=', 'value' => 'catalog']], $catalogPipelines[0]['targets'][0]['filters']);
+        $this->assertSame([['column' => 'deleted_at', 'operator' => '!=', 'value' => null]], $archivePipelines[0]['targets'][0]['filters']);
+        $this->assertSame(['name' => ['trim']], $catalogPipelines[0]['targets'][0]['transforms']);
+        $this->assertSame(['archived_at' => ['date:Y-m-d H:i:s']], $archivePipelines[0]['targets'][0]['transforms']);
+    }
+
+    public function test_step_without_migration_uses_legacy_steps_in_tables_rules(): void
+    {
+        config(['dbtodb_mapping' => [
+            'strict' => true,
+            'runtime' => [
+                'steps_in_tables' => true,
+                'defaults' => [
+                    'chunk' => 25,
+                    'transaction_mode' => 'batch',
+                ],
+            ],
+            'tables' => [
+                'dimensions' => [
+                    'legacy_brands' => 'brands',
+                ],
+                'facts' => [
+                    'legacy_products' => 'products',
+                ],
+            ],
+            'columns' => [
+                'legacy_brands' => [
+                    'brands' => [
+                        'id' => 'id',
+                        'name' => 'name',
+                    ],
+                ],
+                'legacy_products' => [
+                    'products' => [
+                        'id' => 'id',
+                        'brand_id' => 'brand_id',
+                    ],
+                ],
+            ],
+            'migrations' => [
+                'catalog' => [
+                    'source' => 'ignored_source',
+                    'target' => 'ignored_target',
+                    'steps' => [
+                        'dimensions' => [
+                            'tables' => [
+                                'ignored_source_table' => ['ignored_target_table' => ['id' => 'id']],
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+        ]]);
+
+        $pipelines = $this->resolvePipelines(['--step' => 'facts'], 'legacy_mysql', 'pgsql_app');
+
+        $this->assertCount(1, $pipelines);
+        $this->assertSame('legacy:source:legacy_products', $pipelines[0]['name']);
+        $this->assertSame('legacy_products', $pipelines[0]['source']['table']);
+        $this->assertSame('legacy_mysql', $pipelines[0]['source']['connection']);
+        $this->assertSame('pgsql_app', $pipelines[0]['targets'][0]['connection']);
+        $this->assertSame('products', $pipelines[0]['targets'][0]['table']);
+        $this->assertSame(['id' => 'id', 'brand_id' => 'brand_id'], $pipelines[0]['targets'][0]['map']);
+    }
+
 }
