@@ -77,6 +77,65 @@ class DbToDbRoutingExecutorTransformRulesTest extends TestCase
         $this->assertSame(12.0, $this->invokeApplyTransforms(10.0, $definition, ['ignored' => true]));
     }
 
+    public function test_map_row_prefers_target_column_transforms_over_legacy_source_column_transforms(): void
+    {
+        $executor = new DbToDbRoutingExecutor(
+            new DbToDbMappingValidator,
+            new DbToDbSourceReader,
+            new DbToDbTargetWriter,
+        );
+
+        $m = new ReflectionMethod(DbToDbRoutingExecutor::class, 'mapRowToTarget');
+        $m->setAccessible(true);
+
+        $payload = $m->invoke($executor, [
+            'legacy_name' => 'Ada Lovelace',
+        ], [
+            'connection' => 'sqlite',
+            'table' => 'users',
+            'map' => ['legacy_name' => 'name'],
+            'transforms' => [
+                'legacy_name' => ['rule' => 'static', 'value' => 'legacy'],
+                'name' => ['rule' => 'static', 'value' => 'target'],
+            ],
+        ], [
+            'table' => 'users',
+            'columns' => ['name' => ['type' => 'string']],
+            'required' => [],
+        ], true);
+
+        $this->assertSame(['name' => 'target'], $payload);
+    }
+
+    public function test_map_row_supports_legacy_source_column_transforms_for_backward_compatibility(): void
+    {
+        $executor = new DbToDbRoutingExecutor(
+            new DbToDbMappingValidator,
+            new DbToDbSourceReader,
+            new DbToDbTargetWriter,
+        );
+
+        $m = new ReflectionMethod(DbToDbRoutingExecutor::class, 'mapRowToTarget');
+        $m->setAccessible(true);
+
+        $payload = $m->invoke($executor, [
+            'legacy_name' => '  Ada  ',
+        ], [
+            'connection' => 'sqlite',
+            'table' => 'users',
+            'map' => ['legacy_name' => 'name'],
+            'transforms' => [
+                'legacy_name' => ['trim'],
+            ],
+        ], [
+            'table' => 'users',
+            'columns' => ['name' => ['type' => 'string']],
+            'required' => [],
+        ], true);
+
+        $this->assertSame(['name' => 'Ada'], $payload);
+    }
+
     public static function addTwo(mixed $value, array $row): float
     {
         return (float) $value + 2.0;

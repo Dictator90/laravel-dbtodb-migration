@@ -36,6 +36,8 @@ class DbToDbRoutingExecutor
 
     private int $forceGcEveryChunks = 0;
 
+    private DbToDbTransformEngine $transformEngine;
+
     public function __construct(
         private DbToDbMappingValidator $validator,
         private DbToDbSourceReader $sourceReader,
@@ -45,6 +47,7 @@ class DbToDbRoutingExecutor
     ) {
         $this->metadataResolver ??= new TargetTableMetadataResolver;
         $this->filterEngine ??= new DbToDbFilterEngine;
+        $this->transformEngine = new DbToDbTransformEngine;
     }
 
     private function profileLogChannel(): string
@@ -601,7 +604,7 @@ class DbToDbRoutingExecutor
                 }
 
                 $payload[$targetColumn] = $this->normalizeByTargetType(
-                    $this->applyTransforms($value, $transforms[$sourceColumn] ?? null, $sourceRow),
+                    $this->applyTransforms($value, $this->resolveTransformDefinition($transforms, (string) $sourceColumn, $targetColumn), $sourceRow, (string) $sourceColumn, $targetColumn, (string) $target['table']),
                     $targetColumn,
                     $metadata,
                 );
@@ -631,7 +634,7 @@ class DbToDbRoutingExecutor
 
                 $value = $sourceRow[$sourceColumn];
                 $payload[$targetColumn] = $this->normalizeByTargetType(
-                    $this->applyTransforms($value, $transforms[$sourceColumn] ?? null, $sourceRow),
+                    $this->applyTransforms($value, $this->resolveTransformDefinition($transforms, (string) $sourceColumn, $targetColumn), $sourceRow, (string) $sourceColumn, $targetColumn, (string) $target['table']),
                     $targetColumn,
                     $metadata,
                 );
@@ -662,140 +665,40 @@ class DbToDbRoutingExecutor
     }
 
     /**
-     * @param  array<string, mixed>  $sourceRow
+     * @param  array<string, mixed>  $transforms
      */
-    private function applyTransforms(mixed $value, mixed $transformDefinition, array $sourceRow = []): mixed
+    private function resolveTransformDefinition(array $transforms, string $sourceColumn, string $targetColumn): mixed
     {
-        if ($transformDefinition === null) {
-            return $this->normalizeValue($value);
+        if (array_key_exists($targetColumn, $transforms)) {
+            return $transforms[$targetColumn];
         }
 
-        $transforms = is_array($transformDefinition) ? $transformDefinition : [$transformDefinition];
-        $current = $value;
-
-        foreach ($transforms as $transform) {
-            $current = $this->applyTransformRule($current, $transform, $sourceRow);
+        if (array_key_exists($sourceColumn, $transforms)) {
+            return $transforms[$sourceColumn];
         }
 
-        return $this->normalizeValue($current);
+        return null;
     }
 
     /**
      * @param  array<string, mixed>  $sourceRow
      */
-    private function applyTransformRule(mixed $current, mixed $transform, array $sourceRow = []): mixed
-    {
-        if ($transform instanceof \Closure) {
-            return $transform($current, $sourceRow);
-        }
-
-        if (is_string($transform)) {
-            if ($transform === 'trim') {
-                return is_string($current) ? trim($current) : $current;
-            }
-
-            if ($transform === 'null_if_empty') {
-                return is_string($current) && trim($current) === '' ? null : $current;
-            }
-
-            if ($transform === 'zero_date_to_null') {
-                return $this->applyZeroDateToNullTransform($current);
-            }
-
-            throw new RuntimeException(sprintf('Unsupported transform rule "%s".', $transform));
-        }
-
-        if (is_array($transform)) {
-            $ruleName = (string) ($transform['rule'] ?? '');
-            if ($ruleName === 'if_eq') {
-                if (! array_key_exists('value', $transform)) {
-                    throw new RuntimeException('Invalid transform rule "if_eq": missing "value".');
-                }
-                if (! array_key_exists('then', $transform)) {
-                    throw new RuntimeException('Invalid transform rule "if_eq": missing "then".');
-                }
-
-                return $current == $transform['value'] ? $transform['then'] : $current;
-            }
-
-            if ($ruleName === 'multiply') {
-                if ($current === null) {
-                    return null;
-                }
-                if (! array_key_exists('by', $transform)) {
-                    throw new RuntimeException('Invalid transform rule "multiply": missing "by".');
-                }
-
-                return (float) $current * (float) $transform['by'];
-            }
-
-            if ($ruleName === 'round_precision') {
-                if ($current === null) {
-                    return null;
-                }
-                $precision = (int) ($transform['precision'] ?? 0);
-                if (isset($transform['when']) && is_array($transform['when']) && $sourceRow !== []) {
-                    $whenCol = (string) ($transform['when']['column'] ?? '');
-                    $whenIn = $transform['when']['in'] ?? null;
-                    if ($whenCol !== '' && is_array($whenIn)) {
-                        $cell = $sourceRow[$whenCol] ?? null;
-                        if (in_array($cell, $whenIn, true)) {
-                            $precision = (int) ($transform['then_precision'] ?? $precision);
-                        }
-                    }
-                }
-
-                return round((float) $current, $precision);
-            }
-
-            if ($ruleName === 'invoke') {
-                $using = $transform['using'] ?? null;
-                if (! is_array($using) || count($using) !== 2) {
-                    throw new RuntimeException('Invalid transform rule "invoke": "using" must be a [class, method] array.');
-                }
-                $callable = $using;
-                if (! is_callable($callable)) {
-                    throw new RuntimeException('Invalid transform rule "invoke": "using" is not callable.');
-                }
-
-                return $callable($current, $sourceRow);
-            }
-
-            throw new RuntimeException(sprintf('Unsupported transform rule "%s".', $ruleName));
-        }
-
-        throw new RuntimeException(sprintf(
-            'Unsupported transform definition type "%s".',
-            get_debug_type($transform)
-        ));
-    }
-
-    /**
-     * MySQL-style zero dates (0000-00-00); leave any other value unchanged (do not treat as unsupported).
-     */
-    private function applyZeroDateToNullTransform(mixed $current): mixed
-    {
-        if (is_string($current) && preg_match('/^0{4}-0{2}-0{2}/', $current) === 1) {
-            return null;
-        }
-
-        if ($current instanceof \DateTimeInterface) {
-            $year = (int) $current->format('Y');
-            if ($year <= 0) {
-                return null;
-            }
-        }
-
-        return $current;
-    }
-
-    private function normalizeValue(mixed $value): mixed
-    {
-        if (is_string($value) && preg_match('/^0{4}-0{2}-0{2}/', $value) === 1) {
-            return null;
-        }
-
-        return $value;
+    private function applyTransforms(
+        mixed $value,
+        mixed $transformDefinition,
+        array $sourceRow = [],
+        ?string $sourceColumn = null,
+        ?string $targetColumn = null,
+        ?string $targetTable = null,
+    ): mixed {
+        return $this->transformEngine->apply(
+            $value,
+            $transformDefinition,
+            $sourceRow,
+            $sourceColumn,
+            $targetColumn,
+            $targetTable,
+        );
     }
 
     /**
