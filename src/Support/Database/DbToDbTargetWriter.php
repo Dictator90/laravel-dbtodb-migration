@@ -12,6 +12,11 @@ class DbToDbTargetWriter
      */
     private array $resolvedPrimaryKeyCache = [];
 
+    /**
+     * @var array<string, true>
+     */
+    private array $truncatedTargets = [];
+
     private TargetTablePrimaryKeyResolver $primaryKeyResolver;
 
     public function __construct(?TargetTablePrimaryKeyResolver $primaryKeyResolver = null)
@@ -22,6 +27,12 @@ class DbToDbTargetWriter
     public function resetPrimaryKeyCache(): void
     {
         $this->resolvedPrimaryKeyCache = [];
+    }
+
+    public function resetRunState(): void
+    {
+        $this->resetPrimaryKeyCache();
+        $this->truncatedTargets = [];
     }
 
     /**
@@ -39,7 +50,15 @@ class DbToDbTargetWriter
         $table = (string) $target['table'];
         $rowChunks = $this->chunkRowsForBindLimit($connection->getDriverName(), $rows);
 
-        if ($operation === 'insert') {
+        if ($operation === 'truncate_insert') {
+            $truncateKey = $this->truncateKey((string) $target['connection'], $table);
+            if (! isset($this->truncatedTargets[$truncateKey])) {
+                $this->truncateTable($connection, $table);
+                $this->truncatedTargets[$truncateKey] = true;
+            }
+        }
+
+        if ($operation === 'insert' || $operation === 'truncate_insert') {
             foreach ($rowChunks as $chunk) {
                 $connection->table($table)->insert($chunk);
             }
@@ -152,6 +171,22 @@ class DbToDbTargetWriter
         }
 
         return PHP_INT_MAX;
+    }
+
+    private function truncateTable(object $connection, string $table): void
+    {
+        if ((string) $connection->getDriverName() === 'sqlite') {
+            $connection->table($table)->delete();
+
+            return;
+        }
+
+        $connection->table($table)->truncate();
+    }
+
+    private function truncateKey(string $connection, string $table): string
+    {
+        return $connection."\0".$table;
     }
 
     /**

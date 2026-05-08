@@ -103,7 +103,7 @@ php artisan db:to-db --migration=catalog --dry-run
 
 ## Full table syntax
 
-Use the short syntax for simple column maps. Switch to the full target definition when you need filters, transforms, upsert keys, operation, or source runtime settings.
+Use the short syntax for simple column maps. Switch to the full target definition when you need filters, transforms, upsert keys, operation, or source runtime settings. Supported target operations are `upsert`, `insert`, and `truncate_insert` (`truncate_insert` clears each target table once per run before the first write).
 
 ```php
 'migrations' => [

@@ -113,7 +113,7 @@ class DbToDbRoutingExecutor
         $this->memoryLogEveryChunks = max(0, (int) config('dbtodb_mapping.runtime.memory.memory_log_every_chunks', 0));
         $this->forceGcEveryChunks = max(0, (int) config('dbtodb_mapping.runtime.memory.force_gc_every_chunks', 0));
         $total = count($pipelines);
-        $this->targetWriter->resetPrimaryKeyCache();
+        $this->targetWriter->resetRunState();
 
         try {
             foreach ($pipelines as $index => $pipeline) {

@@ -95,7 +95,7 @@ class DbToDbMappingConfigResolverTest extends TestCase
                     'link' => ['trim'],
                 ],
                 'upsert_keys' => ['id'],
-                'operation' => 'upsert',
+                'operation' => 'truncate_insert',
             ],
         ], 'top_banners');
 
@@ -106,7 +106,7 @@ class DbToDbMappingConfigResolverTest extends TestCase
         ], $target['filters']);
         $this->assertSame(['link' => ['trim']], $target['transforms']);
         $this->assertSame(['id'], $target['upsert_keys']);
-        $this->assertSame('upsert', $target['operation']);
+        $this->assertSame('truncate_insert', $target['operation']);
     }
 
     public function test_multiple_targets_for_one_source_are_normalized_in_order(): void

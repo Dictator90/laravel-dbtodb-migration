@@ -92,8 +92,8 @@ class DbToDbMappingValidator
             }
 
             $operation = (string) ($target['operation'] ?? 'upsert');
-            if (! in_array($operation, ['upsert', 'insert'], true)) {
-                throw new RuntimeException(sprintf('Pipeline "%s": target[%d].operation must be upsert or insert.', $name, $index));
+            if (! in_array($operation, ['upsert', 'insert', 'truncate_insert'], true)) {
+                throw new RuntimeException(sprintf('Pipeline "%s": target[%d].operation must be upsert, insert, or truncate_insert.', $name, $index));
             }
         }
     }
