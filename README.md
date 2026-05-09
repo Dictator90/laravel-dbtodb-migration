@@ -1,5 +1,7 @@
 # mb4it/laravel-dbtodb-migration
 
+English | [Русский](README.ru.md)
+
 Laravel 12 package: an Artisan command that copies rows from one configured database connection to one or more target tables on another connection. Runs are driven by named migrations in `config/dbtodb_mapping.php`, with chunked reads, optional keyset pagination, per-target column maps and transforms, filters, upsert vs insert, strict validation, JSON reports, and optional profiling logs.
 
 ## Requirements
@@ -30,35 +32,59 @@ Table prefixes configured on the target connection are honored when reading targ
 
 ## Quick start
 
-The command uses `migrations.default` when `--migration` is omitted. Simple named-migration runs do not need `--source` or `--target` when the migration defines them.
+Use this path when you only need to copy a few columns from one source table into one target table. The command uses `migrations.default` when `--migration` is omitted, so a simple run does not need `--source` or `--target` once the migration defines them.
 
-```php
-// config/dbtodb_mapping.php
-return [
-    'migrations' => [
-        'default' => [
-            'source' => 'legacy_mysql',
-            'target' => 'pgsql_app',
+1. Install and publish the package config:
 
-            'tables' => [
-                'legacy_users' => [
-                    'users' => [
-                        'id' => 'id',
-                        'email' => 'email',
+    ```bash
+    composer require mb4it/laravel-dbtodb-migration
+    php artisan vendor:publish --tag=dbtodb-migration-config
+    ```
+
+2. Add the source and target Laravel database connections in `config/database.php` (for example `legacy_mysql` and `pgsql_app`).
+
+3. Edit `config/dbtodb_mapping.php` and replace the published example with a `default` migration:
+
+    ```php
+    return [
+        'migrations' => [
+            'default' => [
+                'source' => 'legacy_mysql',
+                'target' => 'pgsql_app',
+
+                'tables' => [
+                    // source table => target table => source column => target column
+                    'legacy_users' => [
+                        'users' => [
+                            'id' => 'id',
+                            'email' => 'email',
+                        ],
                     ],
                 ],
             ],
         ],
-    ],
-];
-```
+    ];
+    ```
 
-Run it:
+4. Run a safe validation pass first. `--dry-run` reads data, applies filters/transforms, validates target columns in strict mode, and writes only the JSON report:
 
-```bash
-php artisan db:to-db --dry-run
-php artisan db:to-db
-```
+    ```bash
+    php artisan db:to-db --dry-run
+    ```
+
+5. If the report looks correct, run the migration for real:
+
+    ```bash
+    php artisan db:to-db
+    ```
+
+6. For production-sized data, prefer adding `keyset_column` and an explicit `chunk` size in the full table syntax below.
+
+## Documentation coverage and safety notes
+
+This README documents the public configuration surface for the current migration-centric format: installation, supported drivers, quick start, named migrations, ordered steps, CLI options, runtime/memory settings, automatic target-type transforms, profile logging, sequence synchronization, filters, column transforms, fan-out/fan-in routing, and edge-case behavior. Before running against production data, review the target schema, run `--dry-run`, keep `strict` enabled unless you intentionally want looser validation, and store the generated JSON report for audit/debugging.
+
+The package no longer accepts the older top-level `tables` / `columns` / `filters` config shape; use `migrations.<name>` for every run.
 
 ## Named migrations
 
