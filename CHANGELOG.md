@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Russian README variant (`README.ru.md`) and a clearer quick-start flow with safety notes.
 - Named migrations through `dbtodb_mapping.migrations`.
 - Default migration fallback: `migrations.default`.
 - `--migration` / `-m` CLI option.
