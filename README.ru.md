@@ -131,7 +131,7 @@ php artisan db:to-db --migration=catalog --dry-run
 
 ## Полный синтаксис таблицы
 
-Короткий синтаксис подходит для простой карты колонок. Полный синтаксис нужен для фильтров, трансформаций, ключей upsert, выбора операции, дедупликации, обработки ошибок отдельных строк или настроек чтения исходной таблицы. Поддерживаемые операции: `upsert`, `insert`, `truncate_insert`. `truncate_insert` очищает каждую целевую таблицу один раз за запуск перед первой записью.
+Короткий синтаксис подходит для простой карты колонок. Полный синтаксис нужен для source/target-фильтров, трансформаций, ключей upsert, выбора операции, дедупликации, обработки ошибок отдельных строк или настроек чтения исходной таблицы. Поддерживаемые операции: `upsert`, `insert`, `truncate_insert`. `truncate_insert` очищает каждую целевую таблицу один раз за запуск перед первой записью.
 
 ```php
 'migrations' => [
@@ -158,7 +158,12 @@ php artisan db:to-db --migration=catalog --dry-run
                         'transforms' => [
                             'link' => ['trim', 'null_if_empty'],
                         ],
-                        'filters' => [],
+                        // Необязательные target-фильтры выполняются для каждого target
+                        // после source-фильтров. Используйте их, чтобы направить
+                        // в этот target только часть уже прочитанных source-строк.
+                        'filters' => [
+                            ['column' => 'link', 'operator' => 'not_null'],
+                        ],
                         'upsert_keys' => ['id'],
                         'operation' => 'upsert',
                         'deduplicate' => ['keys' => ['id'], 'strategy' => 'last'],
@@ -273,7 +278,30 @@ php artisan db:to-db --migration=catalog --step=dimensions
 
 Source-фильтры поддерживают операторы `=`, `!=`, `>`, `>=`, `<`, `<=`, `in`, `not_in`, `like`, `not_like`, `null`, `not_null`, `between`, `not_between`, `exists_in`, `where_column`, `date`, `year`, `month`. Фильтры можно задавать простым ассоциативным массивом, списком правил, вложенными группами `and`/`or` или PHP callable, который получает `Illuminate\Database\Query\Builder`.
 
+Source- и target-фильтры выполняются на разных этапах:
+
+1. **Source-фильтры** применяются к SQL-запросу до чтения строк из source БД. Они уменьшают общий набор входных строк для всего pipeline исходной таблицы.
+2. **Target-фильтры** выполняются в PHP отдельно для каждого target после того, как строка прошла source-фильтры, но до маппинга колонок и transforms target. Они не запрашивают target-таблицу и не видят уже преобразованные target-значения; проверяется исходная строка, прочитанная из source. Используйте target-фильтры для fan-out/маршрутизации: например, всех активных пользователей писать в `users`, а только source-строки с `is_admin = 1` — в `admins`.
+
 Target-фильтры используют тот же DSL там, где его можно выполнить над PHP-массивом строки. `exists_in` работает только на SQL-стороне и для target-фильтров отклоняется валидатором. Callable-фильтры для builder предназначены только для source.
+
+Пример target/PHP-фильтра. В target-описании эти правила фильтруют только для этого target строки, уже выбранные через `source.filters`:
+
+```php
+'targets' => [
+    'paid_order_exports' => [
+        'columns' => ['id' => 'id', 'status' => 'status', 'total' => 'total'],
+        'filters' => [
+            ['or' => [
+                ['column' => 'status', 'operator' => '=', 'value' => 'paid'],
+                ['column' => 'customer_email', 'operator' => 'like', 'value' => '%@example.com'],
+            ]],
+            ['column' => 'created_at', 'operator' => 'month', 'value' => 5],
+            ['column' => 'total', 'operator' => 'where_column', 'value' => 'paid_total', 'comparison' => '<='],
+        ],
+    ],
+],
+```
 
 ## Трансформации колонок
 
