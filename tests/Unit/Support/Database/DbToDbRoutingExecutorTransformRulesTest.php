@@ -25,38 +25,6 @@ class DbToDbRoutingExecutorTransformRulesTest extends TestCase
         return $m->invoke($executor, $value, $definition, $sourceRow);
     }
 
-    public function test_multiply_then_round_precision_matches_legacy_yii_course_27(): void
-    {
-        $definition = [
-            ['rule' => 'multiply', 'by' => 27],
-            ['rule' => 'round_precision', 'precision' => -1],
-        ];
-
-        $this->assertSame(2680.0, $this->invokeApplyTransforms(99.2, $definition, ['idb' => 1]));
-        $this->assertSame(2700.0, $this->invokeApplyTransforms(100.0, $definition, ['idb' => 1]));
-    }
-
-    public function test_round_precision_then_precision_when_idb_in_list(): void
-    {
-        $definition = [
-            ['rule' => 'multiply', 'by' => 27],
-            [
-                'rule' => 'round_precision',
-                'precision' => -1,
-                'when' => ['column' => 'idb', 'in' => [755]],
-                'then_precision' => 0,
-            ],
-        ];
-
-        $this->assertSame(2678.0, $this->invokeApplyTransforms(99.2, $definition, ['idb' => 755]));
-        $this->assertSame(2680.0, $this->invokeApplyTransforms(99.2, $definition, ['idb' => 1]));
-    }
-
-    public function test_multiply_returns_null_for_null_input(): void
-    {
-        $this->assertNull($this->invokeApplyTransforms(null, [['rule' => 'multiply', 'by' => 27]], []));
-    }
-
     public function test_closure_transform_receives_row(): void
     {
         $definition = [

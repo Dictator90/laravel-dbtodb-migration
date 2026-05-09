@@ -19,13 +19,13 @@ class DbToDbCommand extends Command
 {
     protected $signature = 'db:to-db
         {--migration= : Named migration key from dbtodb_mapping.migrations}
-        {--tables= : Comma-separated source tables from the selected migration or legacy config}
+        {--tables= : Comma-separated source tables from the selected migration}
         {--dry-run : Validate and read data without writing}
         {--continue-on-error : Continue processing on per-pipeline failure}
         {--report-file= : Write JSON report file}
-        {--source= : Override source database connection from the selected migration or legacy config}
-        {--target= : Override target database connection from the selected migration or legacy config}
-        {--step= : Run only this step key from selected migration steps or legacy runtime.steps_in_tables}
+        {--source= : Override source database connection from the selected migration}
+        {--target= : Override target database connection from the selected migration}
+        {--step= : Run only this step key from selected migration steps}
         {--profile : Log per-pipeline and per-chunk timings to the log channel named in dbtodb_mapping.profile_logging}';
 
     protected $description = 'Universal database-to-database data routing command (1 source -> N targets).';
@@ -262,12 +262,7 @@ class DbToDbCommand extends Command
 
     private function resolveMigrationName(): string
     {
-        $name = $this->stringOptionOrNull('migration');
-        if ($name !== null) {
-            return $name;
-        }
-
-        return array_key_exists('tables', (array) config('dbtodb_mapping')) ? 'legacy' : 'default';
+        return $this->stringOptionOrNull('migration') ?? 'default';
     }
 
     /**

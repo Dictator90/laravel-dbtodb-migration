@@ -98,9 +98,6 @@ class DbToDbTransformEngine
             'coalesce' => $this->applyCoalesceRule($current, $transform, $sourceRow),
             'from_columns' => $this->applyFromColumnsRule($transform, $sourceRow),
             'lookup' => $this->applyLookupRule($current, $transform, $sourceRow),
-            'if_eq' => $this->applyIfEqRule($current, $transform),
-            'multiply' => $this->applyMultiplyRule($current, $transform),
-            'round_precision' => $this->applyRoundPrecisionRule($current, $transform, $sourceRow),
             'invoke' => $this->applyInvokeRule($current, $transform, $sourceRow, $sourceColumn, $targetColumn, $targetTable),
             default => throw new RuntimeException(sprintf('Unsupported transform rule "%s".', $ruleName)),
         };
@@ -456,60 +453,6 @@ class DbToDbTransformEngine
         }
 
         return $transform;
-    }
-
-    /**
-     * @param  array<string, mixed>  $transform
-     */
-    private function applyIfEqRule(mixed $current, array $transform): mixed
-    {
-        if (! array_key_exists('value', $transform)) {
-            throw new RuntimeException('Invalid transform rule "if_eq": missing "value".');
-        }
-        if (! array_key_exists('then', $transform)) {
-            throw new RuntimeException('Invalid transform rule "if_eq": missing "then".');
-        }
-
-        return $current == $transform['value'] ? $transform['then'] : $current;
-    }
-
-    /**
-     * @param  array<string, mixed>  $transform
-     */
-    private function applyMultiplyRule(mixed $current, array $transform): mixed
-    {
-        if ($current === null) {
-            return null;
-        }
-        if (! array_key_exists('by', $transform)) {
-            throw new RuntimeException('Invalid transform rule "multiply": missing "by".');
-        }
-
-        return (float) $current * (float) $transform['by'];
-    }
-
-    /**
-     * @param  array<string, mixed>  $transform
-     * @param  array<string, mixed>  $sourceRow
-     */
-    private function applyRoundPrecisionRule(mixed $current, array $transform, array $sourceRow): mixed
-    {
-        if ($current === null) {
-            return null;
-        }
-        $precision = (int) ($transform['precision'] ?? 0);
-        if (isset($transform['when']) && is_array($transform['when']) && $sourceRow !== []) {
-            $whenCol = (string) ($transform['when']['column'] ?? '');
-            $whenIn = $transform['when']['in'] ?? null;
-            if ($whenCol !== '' && is_array($whenIn)) {
-                $cell = $sourceRow[$whenCol] ?? null;
-                if (in_array($cell, $whenIn, true)) {
-                    $precision = (int) ($transform['then_precision'] ?? $precision);
-                }
-            }
-        }
-
-        return round((float) $current, $precision);
     }
 
     /**
