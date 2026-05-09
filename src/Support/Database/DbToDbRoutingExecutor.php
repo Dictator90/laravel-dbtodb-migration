@@ -231,7 +231,11 @@ class DbToDbRoutingExecutor
 
         $totalRead = 0;
         $totalWritten = 0;
-        $targetWritten = array_fill_keys(array_map(fn (array $target): string => $this->targetKey($target), $targets), 0);
+        $targetKeys = array_map(fn (array $target): string => $this->targetKey($target), $targets);
+        $targetWritten = array_fill_keys($targetKeys, 0);
+        $targetSkipped = array_fill_keys($targetKeys, 0);
+        $targetDeduplicated = array_fill_keys($targetKeys, 0);
+        $targetErrors = array_fill_keys($targetKeys, []);
 
         if ($keysetColumn !== '') {
             $lastKey = null;
@@ -273,9 +277,9 @@ class DbToDbRoutingExecutor
                     try {
                         $writeStartedAt = microtime(true);
                         if ($transactionMode === 'atomic') {
-                            $written = $this->writeAtomicBatch($batch, $targets, $targetMetadata, $strict, $targetWritten);
+                            $written = $this->writeAtomicBatch($batch, $targets, $targetMetadata, $strict, $targetWritten, $targetSkipped, $targetDeduplicated, $targetErrors);
                         } else {
-                            $written = $this->writeBatchMode($batch, $targets, $targetMetadata, $strict, $targetWritten);
+                            $written = $this->writeBatchMode($batch, $targets, $targetMetadata, $strict, $targetWritten, $targetSkipped, $targetDeduplicated, $targetErrors);
                         }
                         $writeSeconds = microtime(true) - $writeStartedAt;
                         if ($this->profileLogging) {
@@ -342,9 +346,9 @@ class DbToDbRoutingExecutor
                     try {
                         $writeStartedAt = microtime(true);
                         if ($transactionMode === 'atomic') {
-                            $written = $this->writeAtomicBatch($batch, $targets, $targetMetadata, $strict, $targetWritten);
+                            $written = $this->writeAtomicBatch($batch, $targets, $targetMetadata, $strict, $targetWritten, $targetSkipped, $targetDeduplicated, $targetErrors);
                         } else {
-                            $written = $this->writeBatchMode($batch, $targets, $targetMetadata, $strict, $targetWritten);
+                            $written = $this->writeBatchMode($batch, $targets, $targetMetadata, $strict, $targetWritten, $targetSkipped, $targetDeduplicated, $targetErrors);
                         }
                         $writeSeconds = microtime(true) - $writeStartedAt;
                         if ($this->profileLogging) {
@@ -389,7 +393,7 @@ class DbToDbRoutingExecutor
             'read' => $totalRead,
             'written' => $dryRun ? 0 : $totalWritten,
             'duration_ms' => (int) round((microtime(true) - $pipelineStartedAt) * 1000),
-            'targets' => array_map(function (array $target) use ($targetWritten): array {
+            'targets' => array_map(function (array $target) use ($targetWritten, $targetSkipped, $targetDeduplicated, $targetErrors): array {
                 $key = $this->targetKey($target);
 
                 return [
@@ -397,6 +401,9 @@ class DbToDbRoutingExecutor
                     'table' => (string) $target['table'],
                     'operation' => (string) ($target['operation'] ?? 'upsert'),
                     'written' => (int) ($targetWritten[$key] ?? 0),
+                    'skipped' => (int) ($targetSkipped[$key] ?? 0),
+                    'deduplicated' => (int) ($targetDeduplicated[$key] ?? 0),
+                    'errors' => array_values((array) ($targetErrors[$key] ?? [])),
                 ];
             }, $targets),
         ];
@@ -442,7 +449,16 @@ class DbToDbRoutingExecutor
      * @param  array<string, array<string, mixed>>  $targetMetadata
      * @param  array<string, int>  $targetWritten
      */
-    private function writeBatchMode(array $batch, array $targets, array $targetMetadata, bool $strict, array &$targetWritten): int
+    private function writeBatchMode(
+        array $batch,
+        array $targets,
+        array $targetMetadata,
+        bool $strict,
+        array &$targetWritten,
+        array &$targetSkipped,
+        array &$targetDeduplicated,
+        array &$targetErrors,
+    ): int
     {
         $written = 0;
         foreach ($targets as $target) {
@@ -458,17 +474,28 @@ class DbToDbRoutingExecutor
                 continue;
             }
 
+            $beforeDedupe = count($rows);
+            $rows = $this->deduplicateRowsForTarget($rows, $target);
+            $targetDeduplicated[$key] += $beforeDedupe - count($rows);
+            if ($rows === []) {
+                continue;
+            }
+
             $writeStartedAt = microtime(true);
-            $count = $this->targetWriter->write($target, $rows);
+            $result = $this->targetWriter->writeWithReport($target, $rows);
             if ($this->profileLogging && $this->profileWriteChunkContext !== null) {
                 $this->profileLogTimed('chunk.write_target', array_merge($this->profileWriteChunkContext, [
                     'target_connection' => (string) $target['connection'],
                     'target_table' => (string) $target['table'],
                     'rows' => count($rows),
+                    'skipped' => $result['skipped'],
+                    'deduplicated' => $beforeDedupe - count($rows),
                 ]), microtime(true) - $writeStartedAt);
             }
-            $targetWritten[$key] += $count;
-            $written += $count;
+            $targetWritten[$key] += $result['written'];
+            $targetSkipped[$key] += $result['skipped'];
+            $targetErrors[$key] = $this->mergeErrorLists((array) $targetErrors[$key], $result['errors']);
+            $written += $result['written'];
             unset($rows);
         }
 
@@ -508,7 +535,16 @@ class DbToDbRoutingExecutor
      * @param  array<string, array<string, mixed>>  $targetMetadata
      * @param  array<string, int>  $targetWritten
      */
-    private function writeAtomicBatch(array $batch, array $targets, array $targetMetadata, bool $strict, array &$targetWritten): int
+    private function writeAtomicBatch(
+        array $batch,
+        array $targets,
+        array $targetMetadata,
+        bool $strict,
+        array &$targetWritten,
+        array &$targetSkipped,
+        array &$targetDeduplicated,
+        array &$targetErrors,
+    ): int
     {
         $connections = array_values(array_unique(array_map(static fn (array $target): string => (string) $target['connection'], $targets)));
         if (count($connections) !== 1) {
@@ -518,30 +554,108 @@ class DbToDbRoutingExecutor
         $connection = DB::connection($connections[0]);
         $written = 0;
 
-        $connection->transaction(function () use ($batch, $targets, $targetMetadata, $strict, &$targetWritten, &$written): void {
-            foreach ($batch as $sourceRow) {
-                foreach ($targets as $target) {
-                    $payload = $this->mapRowToTarget($sourceRow, $target, $targetMetadata[$this->targetKey($target)], $strict);
-                    if ($payload === []) {
-                        continue;
+        $connection->transaction(function () use ($batch, $targets, $targetMetadata, $strict, &$targetWritten, &$targetSkipped, &$targetDeduplicated, &$targetErrors, &$written): void {
+            foreach ($targets as $target) {
+                $key = $this->targetKey($target);
+                $rows = [];
+                foreach ($batch as $sourceRow) {
+                    $payload = $this->mapRowToTarget($sourceRow, $target, $targetMetadata[$key], $strict);
+                    if ($payload !== []) {
+                        $rows[] = $payload;
                     }
+                }
 
+                $beforeDedupe = count($rows);
+                $rows = $this->deduplicateRowsForTarget($rows, $target);
+                $targetDeduplicated[$key] += $beforeDedupe - count($rows);
+
+                foreach ($rows as $payload) {
                     $writeStartedAt = microtime(true);
-                    $count = $this->targetWriter->write($target, [$payload]);
+                    $result = $this->targetWriter->writeWithReport($target, [$payload]);
                     if ($this->profileLogging && $this->profileWriteChunkContext !== null) {
                         $this->profileLogTimed('chunk.write_target', array_merge($this->profileWriteChunkContext, [
                             'target_connection' => (string) $target['connection'],
                             'target_table' => (string) $target['table'],
                             'rows' => 1,
+                            'skipped' => $result['skipped'],
                         ]), microtime(true) - $writeStartedAt);
                     }
-                    $targetWritten[$this->targetKey($target)] += $count;
-                    $written += $count;
+                    $targetWritten[$key] += $result['written'];
+                    $targetSkipped[$key] += $result['skipped'];
+                    $targetErrors[$key] = $this->mergeErrorLists((array) $targetErrors[$key], $result['errors']);
+                    $written += $result['written'];
                 }
             }
         });
 
         return $written;
+    }
+
+    /**
+     * @param  list<array<string, mixed>>  $rows
+     * @param  array<string, mixed>  $target
+     * @return list<array<string, mixed>>
+     */
+    private function deduplicateRowsForTarget(array $rows, array $target): array
+    {
+        if ($rows === []) {
+            return $rows;
+        }
+
+        $deduplicate = $target['deduplicate'] ?? false;
+        $enabled = is_array($deduplicate) ? (bool) ($deduplicate['enabled'] ?? true) : (bool) $deduplicate;
+        if (! $enabled) {
+            return $rows;
+        }
+
+        $keys = is_array($deduplicate) ? array_values((array) ($deduplicate['keys'] ?? [])) : [];
+        if ($keys === []) {
+            $keys = array_values((array) ($target['keys'] ?? []));
+        }
+        $keys = array_values(array_filter(array_map(static fn (mixed $key): string => is_string($key) ? trim($key) : '', $keys)));
+        if ($keys === []) {
+            throw new RuntimeException(sprintf('Target "%s": deduplicate.keys must be a non-empty list (or upsert_keys must be set).', $this->targetKey($target)));
+        }
+
+        $strategy = is_array($deduplicate) ? (string) ($deduplicate['strategy'] ?? 'last') : 'last';
+        if (! in_array($strategy, ['first', 'last'], true)) {
+            throw new RuntimeException(sprintf('Target "%s": deduplicate.strategy must be first or last.', $this->targetKey($target)));
+        }
+
+        $deduped = [];
+        foreach ($rows as $row) {
+            $keyValues = [];
+            foreach ($keys as $key) {
+                if (! array_key_exists($key, $row)) {
+                    throw new RuntimeException(sprintf('Target "%s": deduplicate row missing key column "%s".', $this->targetKey($target), $key));
+                }
+                $keyValues[$key] = $row[$key];
+            }
+            ksort($keyValues);
+            $signature = json_encode($keyValues, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE);
+            if ($strategy === 'first' && array_key_exists($signature, $deduped)) {
+                continue;
+            }
+            $deduped[$signature] = $row;
+        }
+
+        return array_values($deduped);
+    }
+
+    /**
+     * @param  list<string>  $current
+     * @param  list<string>  $incoming
+     * @return list<string>
+     */
+    private function mergeErrorLists(array $current, array $incoming): array
+    {
+        foreach ($incoming as $message) {
+            if (is_string($message) && $message !== '' && ! in_array($message, $current, true)) {
+                $current[] = $message;
+            }
+        }
+
+        return $current;
     }
 
     /**
@@ -712,6 +826,11 @@ class DbToDbRoutingExecutor
 
         $columnMeta = (array) ($metadata['columns'][$targetColumn] ?? []);
         $type = strtolower((string) ($columnMeta['type'] ?? ''));
+        $nullable = (bool) ($columnMeta['nullable'] ?? true);
+
+        if ($value === '' && $nullable && (bool) config('dbtodb_mapping.auto_transforms.empty_string_to_null', true)) {
+            return null;
+        }
 
         $forcedBoolColumns = (array) config('dbtodb_mapping.auto_transforms.bool_columns.'.((string) ($metadata['table'] ?? '')), []);
         $isForcedBoolColumn = in_array($targetColumn, $forcedBoolColumns, true);
@@ -720,16 +839,88 @@ class DbToDbRoutingExecutor
             return $this->castToBoolLike($value);
         }
 
+        if ((bool) config('dbtodb_mapping.auto_transforms.integer', true) && $this->isIntegerType($type)) {
+            return $this->castToIntegerLike($value);
+        }
+
+        if ((bool) config('dbtodb_mapping.auto_transforms.float', true) && $this->isFloatType($type)) {
+            return $this->castToFloatLike($value);
+        }
+
+        if ((bool) config('dbtodb_mapping.auto_transforms.json', true) && $this->isJsonType($type)) {
+            return $this->castToJsonLike($value);
+        }
+
+        if ((bool) config('dbtodb_mapping.auto_transforms.date', true) && $this->isDateType($type)) {
+            return $this->castToDateLike($value, 'Y-m-d');
+        }
+
+        if ((bool) config('dbtodb_mapping.auto_transforms.datetime', true) && $this->isDateTimeType($type)) {
+            return $this->castToDateLike($value, 'Y-m-d H:i:s');
+        }
+
+        if ((bool) config('dbtodb_mapping.auto_transforms.string', false) && $this->isStringType($type) && $value !== null && ! is_string($value)) {
+            return is_scalar($value) ? (string) $value : $this->castToJsonLike($value);
+        }
+
         return $value;
     }
 
     private function isBooleanType(string $type): bool
     {
+        return $type !== '' && str_contains($type, 'bool');
+    }
+
+    private function isIntegerType(string $type): bool
+    {
         if ($type === '') {
             return false;
         }
 
-        return str_contains($type, 'bool');
+        return str_contains($type, 'int') || str_contains($type, 'serial');
+    }
+
+    private function isFloatType(string $type): bool
+    {
+        foreach (['float', 'double', 'real', 'numeric', 'decimal'] as $needle) {
+            if (str_contains($type, $needle)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function isJsonType(string $type): bool
+    {
+        return str_contains($type, 'json');
+    }
+
+    private function isDateType(string $type): bool
+    {
+        return $type === 'date';
+    }
+
+    private function isDateTimeType(string $type): bool
+    {
+        foreach (['datetime', 'timestamp', 'time with time zone', 'time without time zone'] as $needle) {
+            if (str_contains($type, $needle)) {
+                return true;
+            }
+        }
+
+        return $type === 'time';
+    }
+
+    private function isStringType(string $type): bool
+    {
+        foreach (['char', 'text', 'uuid', 'string', 'varchar'] as $needle) {
+            if (str_contains($type, $needle)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function castToBoolLike(mixed $value): mixed
@@ -756,6 +947,68 @@ class DbToDbRoutingExecutor
         }
 
         return $value;
+    }
+
+    private function castToIntegerLike(mixed $value): mixed
+    {
+        if ($value === null || is_int($value)) {
+            return $value;
+        }
+
+        return is_numeric($value) ? (int) $value : $value;
+    }
+
+    private function castToFloatLike(mixed $value): mixed
+    {
+        if ($value === null || is_float($value)) {
+            return $value;
+        }
+
+        return is_numeric($value) ? (float) $value : $value;
+    }
+
+    private function castToJsonLike(mixed $value): mixed
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        if (is_string($value)) {
+            json_decode($value, true);
+            if (json_last_error() === JSON_ERROR_NONE) {
+                return $value;
+            }
+
+            return match ((string) config('dbtodb_mapping.auto_transforms.json_invalid', 'keep')) {
+                'null' => null,
+                'fail' => throw new RuntimeException('Auto transform failed: invalid JSON string.'),
+                default => $value,
+            };
+        }
+
+        $encoded = json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        if ($encoded === false) {
+            throw new RuntimeException('Auto transform failed: JSON encoding failed.');
+        }
+
+        return $encoded;
+    }
+
+    private function castToDateLike(mixed $value, string $format): mixed
+    {
+        if ($value === null || $value instanceof \DateTimeInterface) {
+            return $value instanceof \DateTimeInterface ? $value->format($format) : null;
+        }
+
+        if (! is_scalar($value)) {
+            return $value;
+        }
+
+        try {
+            return (new \DateTimeImmutable((string) $value))->format($format);
+        } catch (\Throwable) {
+            return $value;
+        }
     }
 
     /**

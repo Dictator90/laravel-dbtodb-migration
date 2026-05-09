@@ -73,6 +73,14 @@ return [
     'auto_transforms' => [
         'enabled' => true,
         'bool' => true,
+        'integer' => true,
+        'float' => true,
+        'json' => true,
+        'date' => true,
+        'datetime' => true,
+        'string' => false,
+        'empty_string_to_null' => true,
+        'json_invalid' => 'keep', // keep|null|fail
         'bool_columns' => [
             // 'items' => ['is_active'],
         ],

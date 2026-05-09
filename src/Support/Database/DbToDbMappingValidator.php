@@ -95,6 +95,29 @@ class DbToDbMappingValidator
             if (! in_array($operation, ['upsert', 'insert', 'truncate_insert'], true)) {
                 throw new RuntimeException(sprintf('Pipeline "%s": target[%d].operation must be upsert, insert, or truncate_insert.', $name, $index));
             }
+
+            $writeErrorMode = (string) ($target['on_row_error'] ?? $target['write_error_mode'] ?? 'fail');
+            if (! in_array($writeErrorMode, ['fail', 'skip_row'], true)) {
+                throw new RuntimeException(sprintf('Pipeline "%s": target[%d].on_row_error must be fail or skip_row.', $name, $index));
+            }
+
+            $deduplicate = $target['deduplicate'] ?? false;
+            if (is_array($deduplicate)) {
+                $keys = $deduplicate['keys'] ?? null;
+                if ($keys !== null && (! is_array($keys) || ! array_is_list($keys) || $keys === [])) {
+                    throw new RuntimeException(sprintf('Pipeline "%s": target[%d].deduplicate.keys must be a non-empty list.', $name, $index));
+                }
+                foreach ((array) ($keys ?? []) as $keyIndex => $key) {
+                    if (! is_string($key) || trim($key) === '') {
+                        throw new RuntimeException(sprintf('Pipeline "%s": target[%d].deduplicate.keys[%s] must be a non-empty string.', $name, $index, (string) $keyIndex));
+                    }
+                }
+                if (array_key_exists('strategy', $deduplicate) && ! in_array((string) $deduplicate['strategy'], ['first', 'last'], true)) {
+                    throw new RuntimeException(sprintf('Pipeline "%s": target[%d].deduplicate.strategy must be first or last.', $name, $index));
+                }
+            } elseif (! is_bool($deduplicate)) {
+                throw new RuntimeException(sprintf('Pipeline "%s": target[%d].deduplicate must be bool or object.', $name, $index));
+            }
         }
     }
 }

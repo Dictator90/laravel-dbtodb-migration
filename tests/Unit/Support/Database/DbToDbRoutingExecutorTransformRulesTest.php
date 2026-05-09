@@ -104,6 +104,100 @@ class DbToDbRoutingExecutorTransformRulesTest extends TestCase
         $this->assertSame(['name' => 'Ada'], $payload);
     }
 
+
+    public function test_map_row_auto_transforms_common_target_types(): void
+    {
+        config(['dbtodb_mapping.auto_transforms' => [
+            'enabled' => true,
+            'bool' => true,
+            'integer' => true,
+            'float' => true,
+            'json' => true,
+            'date' => true,
+            'datetime' => true,
+            'empty_string_to_null' => true,
+        ]]);
+
+        $executor = new DbToDbRoutingExecutor(
+            new DbToDbMappingValidator,
+            new DbToDbSourceReader,
+            new DbToDbTargetWriter,
+        );
+
+        $m = new ReflectionMethod(DbToDbRoutingExecutor::class, 'mapRowToTarget');
+        $m->setAccessible(true);
+
+        $payload = $m->invoke($executor, [
+            'active' => 'yes',
+            'count' => '42',
+            'price' => '12.50',
+            'payload' => ['a' => 1],
+            'birthday' => '2026-05-09 10:11:12',
+            'seen_at' => '2026-05-09T10:11:12+00:00',
+            'optional' => '',
+        ], [
+            'connection' => 'sqlite',
+            'table' => 'typed_users',
+            'map' => [
+                'active' => 'active',
+                'count' => 'count',
+                'price' => 'price',
+                'payload' => 'payload',
+                'birthday' => 'birthday',
+                'seen_at' => 'seen_at',
+                'optional' => 'optional',
+            ],
+            'transforms' => [],
+        ], [
+            'table' => 'typed_users',
+            'columns' => [
+                'active' => ['type' => 'boolean', 'nullable' => false],
+                'count' => ['type' => 'integer', 'nullable' => false],
+                'price' => ['type' => 'decimal', 'nullable' => false],
+                'payload' => ['type' => 'json', 'nullable' => true],
+                'birthday' => ['type' => 'date', 'nullable' => true],
+                'seen_at' => ['type' => 'datetime', 'nullable' => true],
+                'optional' => ['type' => 'varchar', 'nullable' => true],
+            ],
+            'required' => [],
+        ], true);
+
+        $this->assertSame(true, $payload['active']);
+        $this->assertSame(42, $payload['count']);
+        $this->assertSame(12.5, $payload['price']);
+        $this->assertSame('{"a":1}', $payload['payload']);
+        $this->assertSame('2026-05-09', $payload['birthday']);
+        $this->assertSame('2026-05-09 10:11:12', $payload['seen_at']);
+        $this->assertNull($payload['optional']);
+    }
+
+    public function test_target_deduplicate_keeps_last_row_by_target_keys(): void
+    {
+        $executor = new DbToDbRoutingExecutor(
+            new DbToDbMappingValidator,
+            new DbToDbSourceReader,
+            new DbToDbTargetWriter,
+        );
+
+        $m = new ReflectionMethod(DbToDbRoutingExecutor::class, 'deduplicateRowsForTarget');
+        $m->setAccessible(true);
+
+        $rows = $m->invoke($executor, [
+            ['email' => 'a@example.test', 'name' => 'first'],
+            ['email' => 'a@example.test', 'name' => 'second'],
+            ['email' => 'b@example.test', 'name' => 'third'],
+        ], [
+            'connection' => 'sqlite',
+            'table' => 'users',
+            'deduplicate' => ['keys' => ['email'], 'strategy' => 'last'],
+        ]);
+
+        $this->assertSame([
+            ['email' => 'a@example.test', 'name' => 'second'],
+            ['email' => 'b@example.test', 'name' => 'third'],
+        ], $rows);
+    }
+
     public static function addTwo(mixed $value, array $row): float
     {
         return (float) $value + 2.0;

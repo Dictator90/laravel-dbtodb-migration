@@ -89,7 +89,7 @@ class DbToDbConfigValidator
         }
 
         if (array_key_exists('filters', $definition)) {
-            $this->validateFilters($definition['filters'], $path.'.filters');
+            $this->validateFilters($definition['filters'], $path.'.filters', true);
         }
 
         if (array_key_exists('runtime', $definition)) {
@@ -126,7 +126,7 @@ class DbToDbConfigValidator
         }
 
         if (array_key_exists('filters', $source)) {
-            $this->validateFilters($source['filters'], $path.'.filters');
+            $this->validateFilters($source['filters'], $path.'.filters', true);
         }
 
         if (array_key_exists('runtime', $source)) {
@@ -177,7 +177,7 @@ class DbToDbConfigValidator
             throw new RuntimeException(sprintf('Invalid %s: expected target definition map.', $path));
         }
 
-        $reserved = ['columns', 'filters', 'transforms', 'operation', 'upsert_keys', 'runtime'];
+        $reserved = ['columns', 'filters', 'transforms', 'operation', 'upsert_keys', 'runtime', 'deduplicate', 'on_row_error', 'write_error_mode'];
         $hasFullShape = false;
         foreach ($reserved as $key) {
             if (array_key_exists($key, $definition)) {
@@ -215,6 +215,16 @@ class DbToDbConfigValidator
         if (array_key_exists('runtime', $definition)) {
             $this->validateRuntime($definition['runtime'], $path.'.runtime');
         }
+
+        if (array_key_exists('deduplicate', $definition)) {
+            $this->validateDeduplicate($definition['deduplicate'], $path.'.deduplicate');
+        }
+
+        foreach (['on_row_error', 'write_error_mode'] as $errorModeKey) {
+            if (array_key_exists($errorModeKey, $definition)) {
+                $this->validateWriteErrorMode($definition[$errorModeKey], $path.'.'.$errorModeKey);
+            }
+        }
     }
 
     private function validateColumns(mixed $columns, string $path): void
@@ -232,10 +242,11 @@ class DbToDbConfigValidator
         }
     }
 
-    private function validateFilters(mixed $filters, string $path): void
+    private function validateFilters(mixed $filters, string $path, bool $allowCallable = false): void
     {
-        if (! is_array($filters)) {
-            throw new RuntimeException(sprintf('Invalid %s: expected filters array.', $path));
+        if (! is_array($filters) && (! $allowCallable || ! is_callable($filters))) {
+            $expected = $allowCallable ? 'filters array or callable' : 'filters array';
+            throw new RuntimeException(sprintf('Invalid %s: expected %s.', $path, $expected));
         }
     }
 
@@ -243,6 +254,32 @@ class DbToDbConfigValidator
     {
         if (! is_array($transforms)) {
             throw new RuntimeException(sprintf('Invalid %s: expected transforms array.', $path));
+        }
+    }
+
+    private function validateDeduplicate(mixed $deduplicate, string $path): void
+    {
+        if (is_bool($deduplicate)) {
+            return;
+        }
+
+        if (! is_array($deduplicate)) {
+            throw new RuntimeException(sprintf('Invalid %s: expected bool or map.', $path));
+        }
+
+        if (array_key_exists('keys', $deduplicate)) {
+            $this->validateUpsertKeys($deduplicate['keys'], $path.'.keys');
+        }
+
+        if (array_key_exists('strategy', $deduplicate) && (! is_string($deduplicate['strategy']) || ! in_array($deduplicate['strategy'], ['first', 'last'], true))) {
+            throw new RuntimeException(sprintf('Invalid %s.strategy: expected first or last.', $path));
+        }
+    }
+
+    private function validateWriteErrorMode(mixed $mode, string $path): void
+    {
+        if (! is_string($mode) || ! in_array($mode, ['fail', 'skip_row'], true)) {
+            throw new RuntimeException(sprintf('Invalid %s: expected fail or skip_row.', $path));
         }
     }
 

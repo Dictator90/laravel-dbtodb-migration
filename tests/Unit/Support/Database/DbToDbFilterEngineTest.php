@@ -53,6 +53,24 @@ class DbToDbFilterEngineTest extends TestCase
         $this->assertStringContainsString('(status in (?, ?) or name like ?)', $sql);
     }
 
+
+    public function test_source_filters_can_use_query_builder_callback(): void
+    {
+        DB::table('dbtodb_filter_source')->insert([
+            ['id' => 1, 'status' => 'active', 'amount' => 10],
+            ['id' => 2, 'status' => 'archived', 'amount' => 20],
+        ]);
+
+        $reader = new DbToDbSourceReader;
+        $rows = $reader->buildQuery([
+            'connection' => 'sqlite',
+            'table' => 'dbtodb_filter_source',
+            'filters' => fn ($query) => $query->where('status', 'active'),
+        ])->pluck('id')->all();
+
+        $this->assertSame([1], $rows);
+    }
+
     public function test_target_row_matching_supports_same_possible_dsl(): void
     {
         $engine = new DbToDbFilterEngine;

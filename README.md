@@ -103,7 +103,7 @@ php artisan db:to-db --migration=catalog --dry-run
 
 ## Full table syntax
 
-Use the short syntax for simple column maps. Switch to the full target definition when you need filters, transforms, upsert keys, operation, or source runtime settings. Supported target operations are `upsert`, `insert`, and `truncate_insert` (`truncate_insert` clears each target table once per run before the first write).
+Use the short syntax for simple column maps. Switch to the full target definition when you need filters, transforms, upsert keys, operation, deduplication, row-error handling, or source runtime settings. Supported target operations are `upsert`, `insert`, and `truncate_insert` (`truncate_insert` clears each target table once per run before the first write).
 
 ```php
 'migrations' => [
@@ -134,6 +134,10 @@ Use the short syntax for simple column maps. Switch to the full target definitio
                         'filters' => [],
                         'upsert_keys' => ['id'],
                         'operation' => 'upsert',
+                        // Optional: prevent target unique-key collisions after mapping/transforms.
+                        'deduplicate' => ['keys' => ['id'], 'strategy' => 'last'],
+                        // Optional: for insert/truncate_insert, skip only rows that fail to write.
+                        'on_row_error' => 'fail', // fail|skip_row
                     ],
                 ],
             ],
@@ -207,8 +211,16 @@ The package coerces values to match common target column shapes after your trans
 
 ```php
 'auto_transforms' => [
-    'enabled' => true,           // Master switch.
-    'bool' => true,              // Cast to bool when target column type looks boolean.
+    'enabled' => true,              // Master switch.
+    'bool' => true,                 // Cast to bool when target column type looks boolean.
+    'integer' => true,              // Cast int/smallint/bigint/serial-like target columns.
+    'float' => true,                // Cast float/double/real/numeric/decimal target columns.
+    'json' => true,                 // Encode arrays/objects for json/jsonb target columns.
+    'date' => true,                 // Format date target columns as Y-m-d.
+    'datetime' => true,             // Format datetime/timestamp target columns as Y-m-d H:i:s.
+    'string' => false,              // Optional scalar-to-string coercion for text/varchar/uuid.
+    'empty_string_to_null' => true, // For nullable target columns.
+    'json_invalid' => 'keep',       // keep|null|fail for invalid JSON strings.
     'bool_columns' => [
         // Force per-table columns to bool even when the driver does not report a boolean type.
         'users' => ['is_admin', 'is_active'],
@@ -216,7 +228,7 @@ The package coerces values to match common target column shapes after your trans
 ],
 ```
 
-`bool` casting accepts `1`, `true`, `'true'`, `'1'`, `'yes'`, `'on'` (and their `false` counterparts); `null` and empty strings stay `null`.
+Auto transforms run **after** explicit column transforms and use resolved target-table metadata. `bool` casting accepts `1`, `true`, `'true'`, `'1'`, `'yes'`, `'on'` (and their `false` counterparts). Empty strings become `null` only when `empty_string_to_null` is enabled and the target column is nullable. Invalid JSON strings are kept by default; set `json_invalid` to `null` or `fail` for stricter behavior.
 
 ## Profile logging and sequence sync
 
@@ -237,9 +249,9 @@ The package coerces values to match common target column shapes after your trans
 
 ## Filters
 
-Source filters support: `=`, `!=`, `>`, `>=`, `<`, `<=`, `in`, `not_in`, `like`, `not_like`, `null`, `not_null`, `between`, `not_between`, `exists_in`, `where_column`, `date`, `year`, and `month`. Filters may be written as a simple associative map, a list of rule arrays, or nested `and` / `or` groups.
+Source filters support: `=`, `!=`, `>`, `>=`, `<`, `<=`, `in`, `not_in`, `like`, `not_like`, `null`, `not_null`, `between`, `not_between`, `exists_in`, `where_column`, `date`, `year`, and `month`. Filters may be written as a simple associative map, a list of rule arrays, nested `and` / `or` groups, or a PHP callable that receives the source `Illuminate\Database\Query\Builder`.
 
-Target filters use the same DSL where it can be evaluated against the PHP source row. `exists_in` is SQL-only and is rejected for target filters with a clear validation error. Target filters run in PHP after the source row is read.
+Target filters use the same DSL where it can be evaluated against the PHP source row. `exists_in` is SQL-only and is rejected for target filters with a clear validation error. Target filters run in PHP after the source row is read. Builder callables are source-only and should not be used for target filters.
 
 Complex source filter example:
 
@@ -268,6 +280,21 @@ Complex source filter example:
             ],
         ]],
     ],
+],
+```
+
+
+Builder callback source filter example (runtime PHP config only; do not use closures if you rely on Laravel `config:cache`):
+
+```php
+'source' => [
+    'filters' => fn (Illuminate\Database\Query\Builder $query) => $query
+        ->where('active', 1)
+        ->whereExists(function ($sub) {
+            $sub->selectRaw('1')
+                ->from('customers')
+                ->whereColumn('customers.id', 'orders.customer_id');
+        }),
 ],
 ```
 
@@ -440,6 +467,8 @@ Because transforms only fire for columns produced by the column map, the recipe 
 These semantics are not always obvious; lock them in before writing migrations against production data:
 
 - **Missing source column.** When a column listed in `columns` is absent from a chunk row, that target column is silently skipped for that row. In `strict` mode, a required (NOT NULL, no default) target column with no value still raises an error.
+- **Target deduplication.** Set `deduplicate => ['keys' => [...], 'strategy' => 'first'|'last']` on a target to collapse mapped payload rows by target columns before writing. This is useful for `insert` / `truncate_insert` targets with unique indexes; `last` is the default strategy. If `keys` is omitted, the target `upsert_keys` are used when available.
+- **Row-level write errors.** Set `on_row_error => 'skip_row'` (or `write_error_mode => 'skip_row'`) to keep the fast batch write path, then fall back to row-by-row writes only if a batch fails. Failed rows are counted as `skipped` and unique error messages are added to the target report. The default is `fail`.
 - **Upsert deduplication.** Within a single chunk, rows that share the same upsert keys are deduplicated **last-wins** before the SQL `UPSERT` is issued — important when the same key appears multiple times in the source.
 - **`truncate_insert`.** The target table is truncated **once per command run**, just before the first write to it. Subsequent chunks (or other source pipelines pointing to the same target) only insert.
 - **Mixed operations across pipelines.** Multiple sources can fan into one target with different operations (e.g. one `truncate_insert`, another `insert`). The truncate happens once.
