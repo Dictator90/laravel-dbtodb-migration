@@ -4,6 +4,7 @@ namespace MB\DbToDb\Support\Database;
 
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
+use Throwable;
 
 class DbToDbTargetWriter
 {
@@ -40,6 +41,39 @@ class DbToDbTargetWriter
      * @param  list<array<string, mixed>>  $rows
      */
     public function write(array $target, array $rows): int
+    {
+        return $this->writeWithReport($target, $rows)['written'];
+    }
+
+    /**
+     * @param  array<string, mixed>  $target
+     * @param  list<array<string, mixed>>  $rows
+     * @return array{written:int, skipped:int, errors:list<string>}
+     */
+    public function writeWithReport(array $target, array $rows): array
+    {
+        if ($rows === []) {
+            return ['written' => 0, 'skipped' => 0, 'errors' => []];
+        }
+
+        if ($this->writeErrorMode($target) === 'skip_row') {
+            try {
+                $written = $this->writeFailFast($target, $rows);
+
+                return ['written' => $written, 'skipped' => 0, 'errors' => []];
+            } catch (Throwable $exception) {
+                return $this->writeRowsSkippingFailures($target, $rows);
+            }
+        }
+
+        return ['written' => $this->writeFailFast($target, $rows), 'skipped' => 0, 'errors' => []];
+    }
+
+    /**
+     * @param  array<string, mixed>  $target
+     * @param  list<array<string, mixed>>  $rows
+     */
+    private function writeFailFast(array $target, array $rows): int
     {
         if ($rows === []) {
             return 0;
@@ -101,6 +135,52 @@ class DbToDbTargetWriter
         }
 
         return count($rows);
+    }
+
+    /**
+     * @param  array<string, mixed>  $target
+     * @param  list<array<string, mixed>>  $rows
+     * @return array{written:int, skipped:int, errors:list<string>}
+     */
+    private function writeRowsSkippingFailures(array $target, array $rows): array
+    {
+        $written = 0;
+        $skipped = 0;
+        $errors = [];
+
+        foreach ($rows as $row) {
+            try {
+                $written += $this->writeFailFast($target, [$row]);
+            } catch (Throwable $exception) {
+                $skipped++;
+                $message = $this->sanitizeExceptionMessage($exception->getMessage());
+                if (! in_array($message, $errors, true)) {
+                    $errors[] = $message;
+                }
+            }
+        }
+
+        return ['written' => $written, 'skipped' => $skipped, 'errors' => $errors];
+    }
+
+    /**
+     * @param  array<string, mixed>  $target
+     */
+    private function writeErrorMode(array $target): string
+    {
+        $mode = (string) ($target['on_row_error'] ?? $target['write_error_mode'] ?? 'fail');
+
+        return $mode === 'skip_row' ? 'skip_row' : 'fail';
+    }
+
+    private function sanitizeExceptionMessage(string $message): string
+    {
+        $trimmed = preg_replace('/\s+\(Connection:.*$/s', '', $message);
+        if (! is_string($trimmed) || $trimmed === '') {
+            $trimmed = $message;
+        }
+
+        return substr($trimmed, 0, 1000);
     }
 
     /**

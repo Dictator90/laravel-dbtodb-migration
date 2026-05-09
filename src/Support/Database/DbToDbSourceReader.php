@@ -41,8 +41,17 @@ class DbToDbSourceReader
         }
 
         $filters = $source['filters'] ?? [];
+        if ($filters instanceof \Closure || is_callable($filters)) {
+            $result = $filters($query);
+            if ($result instanceof Builder) {
+                $query = $result;
+            }
+
+            return $query;
+        }
+
         if (! is_array($filters)) {
-            throw new RuntimeException('Source filters must be an array.');
+            throw new RuntimeException('Source filters must be an array or callable.');
         }
 
         $this->filterEngine->applyToQuery($query, $filters);

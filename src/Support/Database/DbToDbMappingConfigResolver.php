@@ -67,7 +67,7 @@ class DbToDbMappingConfigResolver
         foreach ($tables as $table) {
             $tableDefinition = $this->normalizeMigrationTableDefinition($tablesRoot[$table] ?? null, $table);
             $targetTables = array_keys($tableDefinition['targets']);
-            $sourceFilters = (array) ($tableDefinition['source']['filters'] ?? []);
+            $sourceFilters = $tableDefinition['source']['filters'] ?? [];
 
             $targets = [];
             foreach ($targetTables as $targetTable) {
@@ -106,6 +106,12 @@ class DbToDbMappingConfigResolver
                     'filters' => $targetConfig['filters'] ?? [],
                 ];
 
+                foreach (['deduplicate', 'on_row_error', 'write_error_mode'] as $optionKey) {
+                    if (array_key_exists($optionKey, $targetConfig)) {
+                        $targetDef[$optionKey] = $targetConfig[$optionKey];
+                    }
+                }
+
                 $upsertKeys = $this->normalizeStringList($targetConfig['upsert_keys'] ?? []);
                 if ($upsertKeys !== []) {
                     $targetDef['keys'] = $upsertKeys;
@@ -139,7 +145,7 @@ class DbToDbMappingConfigResolver
                 ));
             }
 
-            $sourceSelect = $this->resolveSourceSelectFromMapping($targets, $sourceFilters, $keysetColumn);
+            $sourceSelect = $this->resolveSourceSelectFromMapping($targets, is_array($sourceFilters) && ! is_callable($sourceFilters) ? $sourceFilters : [], $keysetColumn);
 
             $sourceDef = [
                 'connection' => $source,
@@ -461,7 +467,7 @@ class DbToDbMappingConfigResolver
             ));
         }
 
-        $reserved = ['columns', 'transforms', 'filters', 'upsert_keys', 'operation'];
+        $reserved = ['columns', 'transforms', 'filters', 'upsert_keys', 'operation', 'deduplicate', 'on_row_error', 'write_error_mode'];
         $hasFullShape = false;
         foreach ($reserved as $key) {
             if (array_key_exists($key, $definition)) {

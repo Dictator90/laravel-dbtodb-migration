@@ -17,6 +17,7 @@ class DbToDbTargetWriterTest extends TestCase
         Schema::dropIfExists('chunk_upsert_test');
         Schema::dropIfExists('insert_operation_test');
         Schema::dropIfExists('truncate_insert_writer_test');
+        Schema::dropIfExists('skip_row_insert_test');
 
         parent::tearDown();
     }
@@ -89,6 +90,32 @@ class DbToDbTargetWriterTest extends TestCase
         ], [
             ['id' => 1, 'val' => 'new'],
         ]);
+    }
+
+
+    public function test_insert_operation_can_skip_rows_that_violate_unique_constraints(): void
+    {
+        Schema::create('skip_row_insert_test', function (Blueprint $table): void {
+            $table->integer('id')->primary();
+            $table->string('email')->unique();
+        });
+
+        $writer = new DbToDbTargetWriter;
+        $result = $writer->writeWithReport([
+            'connection' => 'sqlite',
+            'table' => 'skip_row_insert_test',
+            'operation' => 'insert',
+            'on_row_error' => 'skip_row',
+        ], [
+            ['id' => 1, 'email' => 'same@example.test'],
+            ['id' => 2, 'email' => 'same@example.test'],
+            ['id' => 3, 'email' => 'other@example.test'],
+        ]);
+
+        $this->assertSame(2, $result['written']);
+        $this->assertSame(1, $result['skipped']);
+        $this->assertNotEmpty($result['errors']);
+        $this->assertSame([1, 3], DB::table('skip_row_insert_test')->orderBy('id')->pluck('id')->all());
     }
 
     public function test_truncate_insert_truncates_target_only_once_per_writer_run(): void
