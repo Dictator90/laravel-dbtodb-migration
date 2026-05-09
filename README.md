@@ -129,7 +129,7 @@ php artisan db:to-db --migration=catalog --dry-run
 
 ## Full table syntax
 
-Use the short syntax for simple column maps. Switch to the full target definition when you need filters, transforms, upsert keys, operation, deduplication, row-error handling, or source runtime settings. Supported target operations are `upsert`, `insert`, and `truncate_insert` (`truncate_insert` clears each target table once per run before the first write).
+Use the short syntax for simple column maps. Switch to the full target definition when you need source/target filters, transforms, upsert keys, operation, deduplication, row-error handling, or source runtime settings. Supported target operations are `upsert`, `insert`, and `truncate_insert` (`truncate_insert` clears each target table once per run before the first write).
 
 ```php
 'migrations' => [
@@ -157,7 +157,11 @@ Use the short syntax for simple column maps. Switch to the full target definitio
                         'transforms' => [
                             'link' => ['trim', 'null_if_empty'],
                         ],
-                        'filters' => [],
+                        // Optional target filters are evaluated per target after source filters.
+                        // Use them to route only some already-read source rows into this target.
+                        'filters' => [
+                            ['column' => 'link', 'operator' => 'not_null'],
+                        ],
                         'upsert_keys' => ['id'],
                         'operation' => 'upsert',
                         // Optional: prevent target unique-key collisions after mapping/transforms.
@@ -277,7 +281,12 @@ Auto transforms run **after** explicit column transforms and use resolved target
 
 Source filters support: `=`, `!=`, `>`, `>=`, `<`, `<=`, `in`, `not_in`, `like`, `not_like`, `null`, `not_null`, `between`, `not_between`, `exists_in`, `where_column`, `date`, `year`, and `month`. Filters may be written as a simple associative map, a list of rule arrays, nested `and` / `or` groups, or a PHP callable that receives the source `Illuminate\Database\Query\Builder`.
 
-Target filters use the same DSL where it can be evaluated against the PHP source row. `exists_in` is SQL-only and is rejected for target filters with a clear validation error. Target filters run in PHP after the source row is read. Builder callables are source-only and should not be used for target filters.
+Source and target filters run at different stages:
+
+1. **Source filters** are applied to the SQL query before rows are read from the source database. They reduce the shared input set for the whole source-table pipeline.
+2. **Target filters** are evaluated in PHP for each target, after a row has passed source filters and before target column mapping/transforms. They do not query the target table and do not see transformed target values; they inspect the original source row that was read. Use target filters for fan-out/routing, for example: write every active user to `users`, but only source rows with `is_admin = 1` to `admins`.
+
+Target filters use the same DSL where it can be evaluated against the PHP source row. `exists_in` is SQL-only and is rejected for target filters with a clear validation error. Builder callables are source-only and should not be used for target filters.
 
 Complex source filter example:
 
@@ -324,16 +333,21 @@ Builder callback source filter example (runtime PHP config only; do not use clos
 ],
 ```
 
-Equivalent target/PHP filters can use nested groups and row-level operators:
+Equivalent target/PHP filters can use nested groups and row-level operators. In a target definition, these rules filter the rows already selected by `source.filters` for that one target only:
 
 ```php
-'filters' => [
-    ['or' => [
-        ['column' => 'status', 'operator' => '=', 'value' => 'paid'],
-        ['column' => 'customer_email', 'operator' => 'like', 'value' => '%@example.com'],
-    ]],
-    ['column' => 'created_at', 'operator' => 'month', 'value' => 5],
-    ['column' => 'total', 'operator' => 'where_column', 'value' => 'paid_total', 'comparison' => '<='],
+'targets' => [
+    'paid_order_exports' => [
+        'columns' => ['id' => 'id', 'status' => 'status', 'total' => 'total'],
+        'filters' => [
+            ['or' => [
+                ['column' => 'status', 'operator' => '=', 'value' => 'paid'],
+                ['column' => 'customer_email', 'operator' => 'like', 'value' => '%@example.com'],
+            ]],
+            ['column' => 'created_at', 'operator' => 'month', 'value' => 5],
+            ['column' => 'total', 'operator' => 'where_column', 'value' => 'paid_total', 'comparison' => '<='],
+        ],
+    ],
 ],
 ```
 

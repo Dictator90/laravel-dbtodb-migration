@@ -101,8 +101,10 @@ return [
     | Short table syntax:
     |   source_table => [target_table => [source_column => target_column]]
     |
-    | Full table syntax is available when you need filters, transforms, runtime
-    | overrides, upsert keys, or ordered steps.
+    | Full table syntax is available when you need source SQL filters, per-target
+    | routing filters, transforms, runtime overrides, upsert keys, or ordered
+    | steps. Source filters reduce rows before reading; target filters route
+    | already-read source rows before target mapping/transforms.
     |
     */
     'migrations' => [
