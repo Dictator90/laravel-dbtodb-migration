@@ -88,6 +88,235 @@ php artisan vendor:publish --tag=dbtodb-migration-config
 
 Старый верхнеуровневый формат `tables` / `columns` / `filters` больше не поддерживается. Все запуски нужно описывать через `migrations.<name>`.
 
+
+## Полный пример сложного конфига
+
+Ниже — пример production-oriented `config/dbtodb_mapping.php` с глобальными runtime-настройками, auto transforms, упорядоченными шагами, SQL-фильтрами source, routing-фильтрами target, трансформациями, дедупликацией, разными write-операциями и синхронизацией sequences. Пример предполагает, что Laravel-подключения `legacy_mysql` и `pgsql_app` уже описаны в `config/database.php`, а целевые таблицы/колонки соответствуют mapped payload.
+
+```php
+<?php
+
+return [
+    // Для реальных миграций лучше оставлять strict включённым: каждая mapped
+    // target-колонка должна существовать, а обязательные target-колонки должны получить значение.
+    'strict' => true,
+
+    // Используется только при запуске команды с --profile.
+    'profile_logging' => env('DB_TO_DB_LOG_CHANNEL', 'db_to_db'),
+
+    // После успешного запуска без --dry-run синхронизирует auto-increment/serial/identity
+    // counters для перечисленных target-таблиц.
+    'sync_serial_sequences' => true,
+    'sync_serial_sequence_tables' => [
+        'users',
+        ['table' => 'orders', 'column' => 'id'],
+    ],
+
+    'runtime' => [
+        'defaults' => [
+            // Chunk по умолчанию для чтения source, если migration/table не переопределили его.
+            'chunk' => 1000,
+            // Максимум строк в одном SQL insert/upsert statement.
+            'max_rows_per_upsert' => 500,
+            // batch = transaction на chunk; atomic = одна transaction на pipeline.
+            'transaction_mode' => 'batch',
+        ],
+        'memory' => [
+            // 0 отключает периодические memory logs; полезно включать при profiling.
+            'memory_log_every_chunks' => 10,
+            'force_gc_every_chunks' => 20,
+        ],
+        'profile_slow_chunk_seconds' => 5.0,
+        'cli_memory_limit' => '1G',
+    ],
+
+    'auto_transforms' => [
+        'enabled' => true,
+        'bool' => true,
+        'integer' => true,
+        'float' => true,
+        'json' => true,
+        'date' => true,
+        'datetime' => true,
+        'string' => false,
+        'empty_string_to_null' => true,
+        'json_invalid' => 'fail', // падать на строке, если invalid JSON попал в json/jsonb.
+        'bool_columns' => [
+            // Принудительно считать эти колонки boolean, даже если driver вернул generic type.
+            'users' => ['is_active', 'is_admin'],
+        ],
+    ],
+
+    'migrations' => [
+        'default' => [
+            'source' => 'legacy_mysql',
+            'target' => 'pgsql_app',
+
+            // Переопределения на уровне migration; source.runtime у таблицы может переопределить ещё раз.
+            'runtime' => [
+                'defaults' => [
+                    'chunk' => 2000,
+                    'transaction_mode' => 'batch',
+                ],
+            ],
+
+            // Steps выполняются в этом порядке, если --step не указан. Это удобно,
+            // когда facts зависят от dimensions, которые нужно перенести первыми.
+            'steps' => [
+                'dimensions' => [
+                    'tables' => [
+                        'legacy_countries' => [
+                            'targets' => [
+                                'countries' => [
+                                    'columns' => [
+                                        'iso' => 'iso_code',
+                                        'title' => 'name',
+                                    ],
+                                    'transforms' => [
+                                        'iso_code' => ['trim', 'upper'],
+                                        'name' => ['trim', 'null_if_empty'],
+                                    ],
+                                    'upsert_keys' => ['iso_code'],
+                                    'operation' => 'upsert',
+                                ],
+                            ],
+                        ],
+                    ],
+                ],
+
+                'users_and_orders' => [
+                    'tables' => [
+                        'legacy_users' => [
+                            // Source filters превращаются в SQL и уменьшают rows для всех targets.
+                            'source' => [
+                                'filters' => [
+                                    ['column' => 'deleted_at', 'operator' => 'null'],
+                                    ['column' => 'email', 'operator' => 'not_null'],
+                                    ['column' => 'created_at', 'operator' => 'year', 'value' => 2026],
+                                    ['or' => [
+                                        ['column' => 'status', 'operator' => 'in', 'values' => ['active', 'pending']],
+                                        ['column' => 'is_admin', 'operator' => '=', 'value' => 1],
+                                    ]],
+                                ],
+                                'runtime' => [
+                                    // Keyset pagination предпочтительнее для больших таблиц.
+                                    'chunk' => 5000,
+                                    'keyset_column' => 'id',
+                                ],
+                            ],
+
+                            'targets' => [
+                                // Основной target: upsert всех отфильтрованных users.
+                                'users' => [
+                                    'columns' => [
+                                        'id' => 'id',
+                                        'email' => 'email',
+                                        'first_name' => 'name',
+                                        'status' => 'status',
+                                        'country_iso' => 'country_id',
+                                        'is_admin' => 'is_admin',
+                                        'created_at' => 'created_at',
+                                    ],
+                                    'transforms' => [
+                                        'email' => ['trim', 'lower', 'null_if_empty'],
+                                        'name' => [
+                                            ['rule' => 'from_columns', 'columns' => ['first_name', 'last_name'], 'separator' => ' '],
+                                            ['rule' => 'default', 'value' => 'Anonymous'],
+                                        ],
+                                        'status' => ['rule' => 'map', 'map' => ['active' => 'enabled', 'pending' => 'new'], 'default' => 'disabled'],
+                                        'country_id' => [
+                                            'rule' => 'lookup',
+                                            'target' => [
+                                                'connection' => 'pgsql_app',
+                                                'table' => 'countries',
+                                                'key' => 'iso_code',
+                                                'value' => 'id',
+                                            ],
+                                        ],
+                                    ],
+                                    'upsert_keys' => ['id'],
+                                    'operation' => 'upsert',
+                                    'deduplicate' => ['keys' => ['id'], 'strategy' => 'last'],
+                                    'on_row_error' => 'fail',
+                                ],
+
+                                // Routed target: сюда вставляются только source-строки администраторов.
+                                'admins' => [
+                                    'columns' => [
+                                        'id' => 'user_id',
+                                        'email' => 'email',
+                                    ],
+                                    'filters' => [
+                                        ['column' => 'is_admin', 'operator' => '=', 'value' => 1],
+                                    ],
+                                    'operation' => 'insert',
+                                    // Для insert-like операций можно пропустить плохую строку и продолжить pipeline.
+                                    'on_row_error' => 'skip_row',
+                                ],
+                            ],
+                        ],
+
+                        'legacy_orders' => [
+                            'source' => [
+                                'filters' => [
+                                    ['column' => 'total', 'operator' => '>=', 'value' => 0],
+                                    ['column' => 'user_id', 'operator' => 'exists_in', 'value' => [
+                                        'table' => 'legacy_users',
+                                        'column' => 'id',
+                                        'where' => [
+                                            ['column' => 'deleted_at', 'operator' => 'null'],
+                                        ],
+                                    ]],
+                                ],
+                                'runtime' => [
+                                    'chunk' => 1000,
+                                    'keyset_column' => 'id',
+                                ],
+                            ],
+                            'targets' => [
+                                'orders' => [
+                                    'columns' => [
+                                        'id' => 'id',
+                                        'user_id' => 'user_id',
+                                        'total' => 'total',
+                                        'payload_json' => 'payload',
+                                        'created_at' => 'created_at',
+                                    ],
+                                    'transforms' => [
+                                        'total' => ['rule' => 'cast', 'type' => 'float'],
+                                        'payload' => ['rule' => 'cast', 'type' => 'json'],
+                                    ],
+                                    'upsert_keys' => ['id'],
+                                    'operation' => 'upsert',
+                                ],
+                            ],
+                        ],
+                    ],
+                ],
+
+                'refresh_reports' => [
+                    'tables' => [
+                        'legacy_order_report' => [
+                            'targets' => [
+                                'order_reports' => [
+                                    'columns' => [
+                                        'order_id' => 'order_id',
+                                        'summary' => 'summary',
+                                    ],
+                                    // Target очищается один раз, затем вставляется свежий snapshot.
+                                    'operation' => 'truncate_insert',
+                                    'on_row_error' => 'skip_row',
+                                ],
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+        ],
+    ],
+];
+```
+
 ## Именованные миграции
 
 Добавляйте любые миграции внутри верхнеуровневого ключа `migrations`. Выберите нужную миграцию через `--migration=name`.
