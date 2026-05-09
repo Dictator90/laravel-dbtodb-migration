@@ -86,6 +86,235 @@ This README documents the public configuration surface for the current migration
 
 The package no longer accepts the older top-level `tables` / `columns` / `filters` config shape; use `migrations.<name>` for every run.
 
+
+## Complete complex config example
+
+The example below shows a production-oriented `config/dbtodb_mapping.php` with global runtime defaults, auto transforms, ordered steps, source SQL filters, target routing filters, transforms, deduplication, mixed write operations, and sequence synchronization. It assumes that the Laravel connections `legacy_mysql` and `pgsql_app` already exist in `config/database.php`, and that target tables/columns match the mapped payloads.
+
+```php
+<?php
+
+return [
+    // Keep strict mode enabled for real migrations: every mapped target column
+    // must exist and every required target column must receive a value.
+    'strict' => true,
+
+    // Used only when the command is run with --profile.
+    'profile_logging' => env('DB_TO_DB_LOG_CHANNEL', 'db_to_db'),
+
+    // After a successful non-dry run, realign auto-increment/serial/identity
+    // counters for the listed target tables.
+    'sync_serial_sequences' => true,
+    'sync_serial_sequence_tables' => [
+        'users',
+        ['table' => 'orders', 'column' => 'id'],
+    ],
+
+    'runtime' => [
+        'defaults' => [
+            // Default chunk for source reads unless a migration/table overrides it.
+            'chunk' => 1000,
+            // Maximum rows per SQL insert/upsert statement.
+            'max_rows_per_upsert' => 500,
+            // batch = transaction per chunk; atomic = one transaction per pipeline.
+            'transaction_mode' => 'batch',
+        ],
+        'memory' => [
+            // 0 disables periodic memory logs; useful to enable during profiling.
+            'memory_log_every_chunks' => 10,
+            'force_gc_every_chunks' => 20,
+        ],
+        'profile_slow_chunk_seconds' => 5.0,
+        'cli_memory_limit' => '1G',
+    ],
+
+    'auto_transforms' => [
+        'enabled' => true,
+        'bool' => true,
+        'integer' => true,
+        'float' => true,
+        'json' => true,
+        'date' => true,
+        'datetime' => true,
+        'string' => false,
+        'empty_string_to_null' => true,
+        'json_invalid' => 'fail', // fail the row when invalid JSON is mapped to json/jsonb.
+        'bool_columns' => [
+            // Force these columns to boolean even if a driver reports a generic type.
+            'users' => ['is_active', 'is_admin'],
+        ],
+    ],
+
+    'migrations' => [
+        'default' => [
+            'source' => 'legacy_mysql',
+            'target' => 'pgsql_app',
+
+            // Migration-level overrides; table-level source.runtime can override again.
+            'runtime' => [
+                'defaults' => [
+                    'chunk' => 2000,
+                    'transaction_mode' => 'batch',
+                ],
+            ],
+
+            // Steps run in this order when --step is omitted. Use this when facts
+            // depend on dimensions that should be migrated first.
+            'steps' => [
+                'dimensions' => [
+                    'tables' => [
+                        'legacy_countries' => [
+                            'targets' => [
+                                'countries' => [
+                                    'columns' => [
+                                        'iso' => 'iso_code',
+                                        'title' => 'name',
+                                    ],
+                                    'transforms' => [
+                                        'iso_code' => ['trim', 'upper'],
+                                        'name' => ['trim', 'null_if_empty'],
+                                    ],
+                                    'upsert_keys' => ['iso_code'],
+                                    'operation' => 'upsert',
+                                ],
+                            ],
+                        ],
+                    ],
+                ],
+
+                'users_and_orders' => [
+                    'tables' => [
+                        'legacy_users' => [
+                            // Source filters are pushed into SQL and reduce rows for all targets.
+                            'source' => [
+                                'filters' => [
+                                    ['column' => 'deleted_at', 'operator' => 'null'],
+                                    ['column' => 'email', 'operator' => 'not_null'],
+                                    ['column' => 'created_at', 'operator' => 'year', 'value' => 2026],
+                                    ['or' => [
+                                        ['column' => 'status', 'operator' => 'in', 'values' => ['active', 'pending']],
+                                        ['column' => 'is_admin', 'operator' => '=', 'value' => 1],
+                                    ]],
+                                ],
+                                'runtime' => [
+                                    // Keyset pagination is preferable for large tables.
+                                    'chunk' => 5000,
+                                    'keyset_column' => 'id',
+                                ],
+                            ],
+
+                            'targets' => [
+                                // Main target: upsert all filtered users.
+                                'users' => [
+                                    'columns' => [
+                                        'id' => 'id',
+                                        'email' => 'email',
+                                        'first_name' => 'name',
+                                        'status' => 'status',
+                                        'country_iso' => 'country_id',
+                                        'is_admin' => 'is_admin',
+                                        'created_at' => 'created_at',
+                                    ],
+                                    'transforms' => [
+                                        'email' => ['trim', 'lower', 'null_if_empty'],
+                                        'name' => [
+                                            ['rule' => 'from_columns', 'columns' => ['first_name', 'last_name'], 'separator' => ' '],
+                                            ['rule' => 'default', 'value' => 'Anonymous'],
+                                        ],
+                                        'status' => ['rule' => 'map', 'map' => ['active' => 'enabled', 'pending' => 'new'], 'default' => 'disabled'],
+                                        'country_id' => [
+                                            'rule' => 'lookup',
+                                            'target' => [
+                                                'connection' => 'pgsql_app',
+                                                'table' => 'countries',
+                                                'key' => 'iso_code',
+                                                'value' => 'id',
+                                            ],
+                                        ],
+                                    ],
+                                    'upsert_keys' => ['id'],
+                                    'operation' => 'upsert',
+                                    'deduplicate' => ['keys' => ['id'], 'strategy' => 'last'],
+                                    'on_row_error' => 'fail',
+                                ],
+
+                                // Routed target: only admin source rows are inserted here.
+                                'admins' => [
+                                    'columns' => [
+                                        'id' => 'user_id',
+                                        'email' => 'email',
+                                    ],
+                                    'filters' => [
+                                        ['column' => 'is_admin', 'operator' => '=', 'value' => 1],
+                                    ],
+                                    'operation' => 'insert',
+                                    // For insert-like operations, skip bad rows but keep the pipeline running.
+                                    'on_row_error' => 'skip_row',
+                                ],
+                            ],
+                        ],
+
+                        'legacy_orders' => [
+                            'source' => [
+                                'filters' => [
+                                    ['column' => 'total', 'operator' => '>=', 'value' => 0],
+                                    ['column' => 'user_id', 'operator' => 'exists_in', 'value' => [
+                                        'table' => 'legacy_users',
+                                        'column' => 'id',
+                                        'where' => [
+                                            ['column' => 'deleted_at', 'operator' => 'null'],
+                                        ],
+                                    ]],
+                                ],
+                                'runtime' => [
+                                    'chunk' => 1000,
+                                    'keyset_column' => 'id',
+                                ],
+                            ],
+                            'targets' => [
+                                'orders' => [
+                                    'columns' => [
+                                        'id' => 'id',
+                                        'user_id' => 'user_id',
+                                        'total' => 'total',
+                                        'payload_json' => 'payload',
+                                        'created_at' => 'created_at',
+                                    ],
+                                    'transforms' => [
+                                        'total' => ['rule' => 'cast', 'type' => 'float'],
+                                        'payload' => ['rule' => 'cast', 'type' => 'json'],
+                                    ],
+                                    'upsert_keys' => ['id'],
+                                    'operation' => 'upsert',
+                                ],
+                            ],
+                        ],
+                    ],
+                ],
+
+                'refresh_reports' => [
+                    'tables' => [
+                        'legacy_order_report' => [
+                            'targets' => [
+                                'order_reports' => [
+                                    'columns' => [
+                                        'order_id' => 'order_id',
+                                        'summary' => 'summary',
+                                    ],
+                                    // Truncate the target once, then insert the fresh snapshot.
+                                    'operation' => 'truncate_insert',
+                                    'on_row_error' => 'skip_row',
+                                ],
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+        ],
+    ],
+];
+```
+
 ## Named migrations
 
 Add as many migrations as you need under the top-level `migrations` node. Select one with `--migration=name`.
