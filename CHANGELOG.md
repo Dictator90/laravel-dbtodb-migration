@@ -14,6 +14,7 @@ All notable changes to this project will be documented in this file.
 - Full table syntax with `source`, `targets`, `filters`, `transforms`, `upsert_keys`, `operation`, runtime options.
 - Ordered migration `steps`.
 - End-to-end stress test (`tests/Feature/DbToDbStressTest.php`) that loads 30,000 rows in `legacy_users` and 30,000 in `legacy_orders` (plus profiles and event sources), exercises the full feature surface — keyset pagination, multi-step ordering, fan-out (1 source → users + admins + audit_log with filters and static columns), fan-in (legacy_users + legacy_orders → audit_log, events_a + events_b → unified_events with static `origin`/`source_table`/`event_type` columns), upsert / insert / lookup across connections, JSON / bool / int casts, map / replace / default / trim / lower / upper transforms, nested filters and `in` lists — and prints throughput statistics (rows, duration, rps, peak memory).
+- README sections covering the full runtime config reference (memory/profile/cli limits), `auto_transforms.bool_columns`, `profile_logging`, `sync_serial_sequences` / `sync_serial_sequence_tables`, fan-out / fan-in routing patterns with static columns, the closure 2-arg vs 5-arg signatures with examples, and a "Behavior reference" section documenting silent skip of unmapped source columns, upsert last-wins deduplication, `truncate_insert` once-per-run semantics, `atomic` mode same-connection constraint, lookup cache lifetime, and PostgreSQL placeholder-limit auto-chunking.
 
 ### Changed
 

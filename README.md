@@ -189,7 +189,51 @@ php artisan db:to-db --migration=catalog --step=dimensions
 
 Global defaults live in `runtime.defaults`; a migration may override them with `migrations.{name}.runtime.defaults`, and a source table may override `chunk`, `transaction_mode`, and `keyset_column` in its `source` definition.
 
-`runtime.defaults.max_rows_per_upsert` caps rows per SQL insert/upsert statement and helps avoid huge binding arrays. `runtime.cli_memory_limit`, `runtime.memory.memory_log_every_chunks`, `runtime.memory.force_gc_every_chunks`, and `--profile` are useful for tuning large migrations.
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `runtime.defaults.chunk` | `500` | Rows read per chunk. |
+| `runtime.defaults.max_rows_per_upsert` | `500` | Cap on rows per insert/upsert statement. The writer also auto-splits batches that would exceed PostgreSQL's 65535 placeholder limit, so `max_rows_per_upsert` mostly controls statement size, not correctness. |
+| `runtime.defaults.transaction_mode` | `'batch'` | `batch` wraps each chunk write in one transaction (efficient). `atomic` wraps the entire pipeline in a single transaction — **all targets must share one connection**, otherwise the run fails fast. |
+| `runtime.memory.memory_log_every_chunks` | `0` (off) | When `>0`, logs `memory_get_usage()` every N chunks via the profile channel. |
+| `runtime.memory.force_gc_every_chunks` | `20` | Calls `gc_collect_cycles()` every N chunks. Set to `0` to disable. |
+| `runtime.profile_slow_chunk_seconds` | `5.0` | Chunks slower than this are tagged `slow: true` in profile logs. |
+| `runtime.cli_memory_limit` | unset | When set (e.g. `'1G'`), passes the value to `ini_set('memory_limit', …)` at command start. |
+
+A source table can opt in to keyset pagination by setting `keyset_column` (e.g. `'id'`). Requirements: the column must be present in the source SELECT (the resolver adds it automatically when you use a column map), it must be sortable, and values should be unique and monotonically increasing — otherwise rows can be skipped or duplicated across chunks. Without `keyset_column`, the reader falls back to offset pagination.
+
+## Auto transforms
+
+The package coerces values to match common target column shapes after your transforms run. Configure under `auto_transforms`:
+
+```php
+'auto_transforms' => [
+    'enabled' => true,           // Master switch.
+    'bool' => true,              // Cast to bool when target column type looks boolean.
+    'bool_columns' => [
+        // Force per-table columns to bool even when the driver does not report a boolean type.
+        'users' => ['is_admin', 'is_active'],
+    ],
+],
+```
+
+`bool` casting accepts `1`, `true`, `'true'`, `'1'`, `'yes'`, `'on'` (and their `false` counterparts); `null` and empty strings stay `null`.
+
+## Profile logging and sequence sync
+
+```php
+'profile_logging' => env('DB_TO_DB_LOG_CHANNEL', 'db_to_db'),
+
+'sync_serial_sequences' => true,
+'sync_serial_sequence_tables' => [
+    // Optional explicit list. When omitted, the command derives target tables
+    // from the executed pipelines.
+    'users',
+    ['table' => 'orders', 'column' => 'order_id'],
+],
+```
+
+- `--profile` writes per-pipeline / per-chunk timings, memory snapshots, and start/end events to the channel named in `profile_logging`. Define the channel in `config/logging.php` (e.g. a daily file).
+- `sync_serial_sequences` realigns auto-increment / serial / identity counters on the target connection after a successful run. Drivers supported: `pgsql` (`setval`), `mysql`/`mariadb` (`ALTER TABLE … AUTO_INCREMENT`), `sqlite` (`sqlite_sequence`), `sqlsrv` (`DBCC CHECKIDENT`). The sync only fires when no pipelines failed and the run was not a `--dry-run`.
 
 ## Filters
 
@@ -299,7 +343,112 @@ Supported array rules:
 - `lookup`: resolve the current value (or `from_column`) through a source/target database table using `connection`, `table`, `key`, and `value` directly on the rule or inside a nested `source` / `target` array; lookups are cached per transform engine instance.
 - `invoke`: call a `[class, method]` pair.
 
-Closures and `invoke` callables receive the current value, full source row, source column, target column, and target table: `(mixed $value, array $sourceRow, ?string $sourceColumn, ?string $targetColumn, ?string $targetTable) => mixed`. Existing two-argument closures remain compatible in PHP configs.
+Closures and `invoke` callables receive the current value, full source row, source column, target column, and target table: `(mixed $value, array $sourceRow, ?string $sourceColumn, ?string $targetColumn, ?string $targetTable) => mixed`. Two-argument closures (`fn ($value, $row) => …`) remain compatible.
+
+```php
+'transforms' => [
+    // Five-argument closure (preferred).
+    'audit_label' => fn ($value, array $row, ?string $src, ?string $dst, ?string $table)
+        => sprintf('%s:%s=%s', $table, $dst, $value),
+
+    // Two-argument form (still supported).
+    'full_name' => fn ($value, array $row) => trim(($row['first_name'] ?? '').' '.($row['last_name'] ?? '')),
+
+    // Template via `from_columns`.
+    'address' => [
+        'rule' => 'from_columns',
+        'columns' => ['street', 'city', 'country'],
+        'template' => '{street}, {city} ({country})',
+    ],
+],
+```
+
+`lookup` caches results per `DbToDbTransformEngine` instance for the lifetime of one command run. The cache is keyed by `(connection, table, key column, value column, lookup value)`, so high-cardinality lookups grow memory linearly with distinct values. For very large fan-outs, prefer denormalising on the source side or use `invoke` with your own bounded cache.
+
+## Routing patterns
+
+### Fan-out (1 source → N targets)
+
+```php
+'tables' => [
+    'legacy_users' => [
+        'targets' => [
+            'users' => [
+                'columns' => ['id' => 'id', 'email' => 'email', 'is_admin' => 'is_admin'],
+                'upsert_keys' => ['id'],
+                'operation' => 'upsert',
+            ],
+            'admins' => [
+                'columns' => ['id' => 'id', 'email' => 'email'],
+                'filters' => [
+                    ['column' => 'is_admin', 'operator' => '=', 'value' => 1],
+                ],
+                'operation' => 'insert',
+            ],
+        ],
+    ],
+],
+```
+
+Each target reads the same source row but applies its own filters/transforms/operation. When a source maps to more than one target, every target must declare a non-empty `columns` map.
+
+### Fan-in (N sources → 1 target) with static columns
+
+Two source tables write into the same target table. Use a `static` transform to mark the origin per pipeline.
+
+```php
+'tables' => [
+    'legacy_users' => [
+        'targets' => [
+            'audit_log' => [
+                'columns' => [
+                    'id' => 'ref_id',
+                    'name' => 'source_table',  // placeholder — overwritten by static below.
+                    'email' => 'event_type',   // placeholder — overwritten by static below.
+                ],
+                'transforms' => [
+                    'source_table' => ['rule' => 'static', 'value' => 'users'],
+                    'event_type'   => ['rule' => 'static', 'value' => 'user_imported'],
+                ],
+                'operation' => 'insert',
+            ],
+        ],
+    ],
+    'legacy_orders' => [
+        'targets' => [
+            'audit_log' => [
+                'columns' => [
+                    'id' => 'ref_id',
+                    'currency' => 'source_table',
+                    'status'   => 'event_type',
+                ],
+                'transforms' => [
+                    'source_table' => ['rule' => 'static', 'value' => 'orders'],
+                    'event_type'   => ['rule' => 'static', 'value' => 'order_imported'],
+                ],
+                'operation' => 'insert',
+            ],
+        ],
+    ],
+],
+```
+
+Because transforms only fire for columns produced by the column map, the recipe above wires any source column into the target column you want to fill statically. The `static` transform discards the mapped value and writes the literal.
+
+## Behavior reference
+
+These semantics are not always obvious; lock them in before writing migrations against production data:
+
+- **Missing source column.** When a column listed in `columns` is absent from a chunk row, that target column is silently skipped for that row. In `strict` mode, a required (NOT NULL, no default) target column with no value still raises an error.
+- **Upsert deduplication.** Within a single chunk, rows that share the same upsert keys are deduplicated **last-wins** before the SQL `UPSERT` is issued — important when the same key appears multiple times in the source.
+- **`truncate_insert`.** The target table is truncated **once per command run**, just before the first write to it. Subsequent chunks (or other source pipelines pointing to the same target) only insert.
+- **Mixed operations across pipelines.** Multiple sources can fan into one target with different operations (e.g. one `truncate_insert`, another `insert`). The truncate happens once.
+- **`atomic` transaction mode.** Every target in the pipeline must use the same connection. The executor refuses to start the pipeline otherwise. Use `batch` for cross-connection routing.
+- **`dry-run`.** Reads the source, applies filters/transforms, validates strictness, but never opens a write transaction or fires `sync_serial_sequences`.
+- **`continue-on-error`.** Failures in one pipeline are reported in the JSON report and the table view; remaining pipelines still run.
+- **Strict mode.** When `strict` is true (default), every target column referenced by `columns` must exist on the target table, and required columns must end up in the payload after transforms.
+- **Auto-increment sync.** Runs only after a successful write phase. Skipped automatically for unsupported drivers.
+- **PostgreSQL placeholder limit.** Insert/upsert batches that would exceed 65535 placeholders are split automatically based on the column count of the target table.
 
 ## Developing this package
 
