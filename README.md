@@ -30,7 +30,7 @@ Table prefixes configured on the target connection are honored when reading targ
 
 ## Quick start
 
-The command uses the legacy top-level mapping when `tables` exists at the config root; otherwise it uses `migrations.default` when `--migration` is omitted. Simple named-migration runs do not need `--source` or `--target` when the migration defines them.
+The command uses `migrations.default` when `--migration` is omitted. Simple named-migration runs do not need `--source` or `--target` when the migration defines them.
 
 ```php
 // config/dbtodb_mapping.php
@@ -175,9 +175,9 @@ php artisan db:to-db --migration=catalog --step=dimensions
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `--migration=` | legacy top-level mapping or `default` | Named migration from `dbtodb_mapping.migrations`; when omitted, top-level legacy `tables`/`columns` config is honored if present, otherwise `migrations.default` is used. |
+| `--migration=` | `default` | Named migration from `dbtodb_mapping.migrations`. When omitted, `migrations.default` is used. |
 | `--tables=` | all source tables in selected migration/step | Comma-separated source table names. |
-| `--step=` | all steps | Run one step from the selected migration, or from legacy top-level `runtime.steps_in_tables` when `--migration` is omitted. |
+| `--step=` | all steps | Run one step from the selected migration. |
 | `--source=` | migration `source` | Override source connection. |
 | `--target=` | migration `target` | Override target connection. |
 | `--dry-run` | off | Validate and read without writing. |
@@ -242,7 +242,7 @@ Equivalent target/PHP filters can use nested groups and row-level operators:
 
 ## Column transforms
 
-Transforms run before target type coercion. You can keep the legacy addressing style where `transforms` is keyed by **source column**, or use the newer style where it is keyed by **target column** in the target definition. When both keys exist for a mapped column, the target-column definition wins.
+Transforms are keyed by **target column** in the target definition.
 
 ```php
 'targets' => [
@@ -257,7 +257,6 @@ Transforms run before target type coercion. You can keep the legacy addressing s
         ],
 
         'transforms' => [
-            // New style: key by target column.
             'email' => ['trim', 'lower', 'null_if_empty'],
             'name' => [
                 ['rule' => 'from_columns', 'columns' => ['first_name', 'last_name'], 'separator' => ' '],
@@ -275,8 +274,7 @@ Transforms run before target type coercion. You can keep the legacy addressing s
                 ],
             ],
 
-            // Legacy style is still supported: key by source column.
-            'legacy_id' => ['rule' => 'cast', 'type' => 'int'],
+            'id' => ['rule' => 'cast', 'type' => 'int'],
         ],
     ],
 ],
@@ -299,7 +297,6 @@ Supported array rules:
 - `coalesce`: return the first non-null item from `items`, with optional `default`.
 - `from_columns`: build a value from multiple source columns using `columns` plus either `separator` or a `template` such as `'{last_name}, {first_name}'`.
 - `lookup`: resolve the current value (or `from_column`) through a source/target database table using `connection`, `table`, `key`, and `value` directly on the rule or inside a nested `source` / `target` array; lookups are cached per transform engine instance.
-- Legacy rules: `if_eq`, `multiply`, and `round_precision`.
 - `invoke`: call a `[class, method]` pair.
 
 Closures and `invoke` callables receive the current value, full source row, source column, target column, and target table: `(mixed $value, array $sourceRow, ?string $sourceColumn, ?string $targetColumn, ?string $targetTable) => mixed`. Existing two-argument closures remain compatible in PHP configs.

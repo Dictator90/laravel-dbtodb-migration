@@ -83,7 +83,7 @@ return [
     | Named migrations
     |--------------------------------------------------------------------------
     |
-    | The command uses migrations.default when --migration is omitted, unless you keep the legacy top-level tables/columns format.
+    | The command uses migrations.default when --migration is omitted.
     | Every migration declares its source and target connections here, so simple
     | runs do not need --source or --target:
     |

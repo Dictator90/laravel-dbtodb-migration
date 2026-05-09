@@ -140,17 +140,6 @@ class DbToDbTransformEngineTest extends TestCase
         $this->assertSame('v:5:source_col:target_col:target_table', $this->transform('v', ['rule' => 'invoke', 'using' => [self::class, 'contextValue']], ['id' => 5]));
     }
 
-    public function test_legacy_rules_still_work(): void
-    {
-        $definition = [
-            ['rule' => 'multiply', 'by' => 27],
-            ['rule' => 'round_precision', 'precision' => -1],
-        ];
-
-        $this->assertSame(2680.0, $this->transform(99.2, $definition, ['idb' => 1]));
-        $this->assertNull($this->transform(null, [['rule' => 'multiply', 'by' => 27]], []));
-    }
-
     public static function contextValue(mixed $value, array $row, ?string $sourceColumn, ?string $targetColumn, ?string $targetTable): string
     {
         return implode(':', [$value, $row['id'], $sourceColumn, $targetColumn, $targetTable]);

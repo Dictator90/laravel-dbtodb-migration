@@ -16,58 +16,6 @@ class DbToDbMappingConfigResolverTest extends TestCase
         $this->resolver = new DbToDbMappingConfigResolver();
     }
 
-    public function test_legacy_format_is_normalized_to_targets_with_columns_and_runtime(): void
-    {
-        $normalized = $this->resolver->normalizeLegacyTableDefinition([
-            'tables' => [
-                'legacy_users' => 'users',
-            ],
-            'columns' => [
-                'legacy_users' => [
-                    'users' => [
-                        'id' => 'id',
-                        'email' => 'email',
-                    ],
-                ],
-            ],
-            'filters' => [
-                'legacy_users' => [
-                    ['column' => 'active', 'operator' => '=', 'value' => 1],
-                ],
-            ],
-            'transforms' => [
-                'legacy_users' => [
-                    'email' => ['trim'],
-                ],
-            ],
-            'upsert_keys' => [
-                'legacy_users' => ['id'],
-            ],
-            'runtime' => [
-                'tables' => [
-                    'legacy_users' => [
-                        'chunk' => 50,
-                        'keyset_column' => 'id',
-                    ],
-                ],
-            ],
-        ], 'legacy_users');
-
-        $this->assertSame([
-            'filters' => [
-                ['column' => 'active', 'operator' => '=', 'value' => 1],
-            ],
-            'runtime' => [
-                'chunk' => 50,
-                'keyset_column' => 'id',
-            ],
-        ], $normalized['source']);
-        $this->assertSame(['id' => 'id', 'email' => 'email'], $normalized['targets']['users']['columns']);
-        $this->assertSame(['email' => ['trim']], $normalized['targets']['users']['transforms']);
-        $this->assertSame(['id'], $normalized['targets']['users']['upsert_keys']);
-        $this->assertSame('upsert', $normalized['targets']['users']['operation']);
-    }
-
     public function test_short_inline_format_is_normalized_as_columns(): void
     {
         $normalized = $this->resolver->normalizeMigrationTableDefinition([
