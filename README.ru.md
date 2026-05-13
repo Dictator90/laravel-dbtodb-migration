@@ -380,12 +380,17 @@ php artisan db:to-db --migration=catalog --dry-run
 
                 'targets' => [
                     'catalog_banners' => [
+                        // Колонки можно оставить пустыми (`'columns' => []`), если
+                        // все значения генерируются в transforms.
                         'columns' => [
                             'id' => 'id',
                             'link' => 'link',
                         ],
                         'transforms' => [
                             'link' => ['trim', 'null_if_empty'],
+                            // Можно добавлять статичные правила для колонок,
+                            // которых нет в исходной таблице:
+                            'type' => ['rule' => 'static', 'value' => 1],
                         ],
                         // Необязательные target-фильтры выполняются для каждого target
                         // после source-фильтров. Используйте их, чтобы направить

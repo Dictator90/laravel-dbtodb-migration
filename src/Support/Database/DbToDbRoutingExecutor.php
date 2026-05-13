@@ -755,6 +755,27 @@ class DbToDbRoutingExecutor
             }
         }
 
+        // Transforms for columns that are not in the source
+        foreach ($transforms as $column => $transform) {
+            if (array_key_exists($column, $payload)) {
+                continue;
+            }
+
+            if ($strict && ! array_key_exists($column, (array) $metadata['columns'])) {
+                throw new RuntimeException(sprintf(
+                    'Strict mapping failed for target "%s": transformed column "%s" does not exist.',
+                    $this->targetKey($target),
+                    $column
+                ));
+            }
+
+            $payload[$column] = $this->normalizeByTargetType(
+                $this->applyTransforms(null, $transform, $sourceRow, null, $column, (string) $target['table']),
+                $column,
+                $metadata,
+            );
+        }
+
         if ($strict) {
             $required = (array) ($target['required'] ?? $metadata['required'] ?? []);
             $missing = array_values(array_diff($required, array_keys($payload)));
