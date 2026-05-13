@@ -355,7 +355,7 @@ class DbToDbConfigValidator
 
     private function assertMap(mixed $value, string $path, bool $allowEmpty = false): void
     {
-        if (! is_array($value) || array_is_list($value) || (! $allowEmpty && $value === [])) {
+        if (! is_array($value) || (array_is_list($value) && $value !== []) || (! $allowEmpty && $value === [])) {
             throw new RuntimeException(sprintf('Invalid %s: expected non-empty map.', $path));
         }
     }
